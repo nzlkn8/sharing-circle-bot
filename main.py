@@ -263,43 +263,34 @@ async def handle_message(request: Request):
         entry = data["entry"][0]
         changes = entry["changes"][0]
         value = changes["value"]
-        
+
         if "messages" not in value:
             return {"status": "no message"}
-        
+
         message = value["messages"][0]
         phone = message["from"]
         text = message.get("text", {}).get("body", "").strip()
-        
+
         if not text:
             return {"status": "no text"}
-        
+
         user = get_user(phone)
-        
-        # New user
+
         if not user:
             await handle_new_user(phone)
             return {"status": "ok"}
-        
-        # Onboarding incomplete
-        if user["name"] == "__awaiting_name__" or not user.get("email"):
-            handled = await handle_onboarding(user, phone, text)
-            if handled:
-                return {"status": "ok"}
 
-        if not text:
-            await send_whatsapp_message(phone, "👋 Welcome to SharingCircle! Send me any link or thought to share with your circle. Type *help* for commands.")
+        if user["name"] is None or user["name"] == "__awaiting_name__" or not user.get("email"):
+            await handle_onboarding(user, phone, text)
             return {"status": "ok"}
-        
-        # Commands
+
         handled = await handle_command(phone, text, user)
         if handled:
             return {"status": "ok"}
-        
-        # Regular post
+
         await handle_post(phone, text, user)
-        
+
     except Exception as e:
         print(f"Error: {e}")
-    
+
     return {"status": "ok"}
