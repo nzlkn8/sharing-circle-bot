@@ -1,9 +1,11 @@
 import os
 import re
+import random
+import string
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from supabase import create_client
-import httpx
 
 app = FastAPI()
 
@@ -12,15 +14,24 @@ MY_TOKEN = "SharingCircle2026"
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 PHONE_NUMBER_ID = "918546528019408"
+BASE_URL = "https://sharing-circle.vercel.app"
+CIRCLE_LIMIT = 15
 
-# Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- Helpers ---
 
 def extract_url(text):
     pattern = r'https?://[^\s]+'
     urls = re.findall(pattern, text)
     return urls[0] if urls else None
+
+def generate_slug(name):
+    clean = re.sub(r'[^a-z0-9]', '', name.lower())[:10]
+    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    return f"{clean}-{suffix}"
 
 async def send_whatsapp_message(to, message):
     url = f"https://graph.facebook.com/v22.0/{PHONE_NUMBER_ID}/messages"
@@ -36,6 +47,200 @@ async def send_whatsapp_message(to, message):
     }
     async with httpx.AsyncClient() as client:
         await client.post(url, json=payload, headers=headers)
+
+async def ai_process(content, is_url=True):
+    """Get category and summary from Claude API"""
+    if is_url:
+        prompt = f"""Analyze this URL and provide:
+1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+2. A 2-3 sentence summary of what this link is likely about based on the URL
+
+URL: {content}
+
+Respond in this exact format:
+CATEGORY: [category]
+SUMMARY: [summary]"""
+    else:
+        prompt = f"""Analyze this thought/message and provide:
+1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+2. A 1-2 sentence restatement of the key point
+
+Text: {content}
+
+Respond in this exact format:
+CATEGORY: [category]
+SUMMARY: [summary]"""
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 200,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30
+        )
+        result = response.json()
+        text = result["content"][0]["text"]
+        
+        category = "other"
+        summary = content
+        
+        for line in text.split('\n'):
+            if line.startswith("CATEGORY:"):
+                category = line.replace("CATEGORY:", "").strip().lower()
+            elif line.startswith("SUMMARY:"):
+                summary = line.replace("SUMMARY:", "").strip()
+        
+        return category, summary
+
+def get_user(phone):
+    result = supabase.table("users").select("*").eq("phone_number", phone).execute()
+    return result.data[0] if result.data else None
+
+async def handle_new_user(phone):
+    await send_whatsapp_message(phone, 
+        "👋 Welcome to SharingCircle!\n\nI help you share links and thoughts with your closest friends — privately and beautifully.\n\nFirst, what's your name?")
+    supabase.table("users").insert({
+        "phone_number": phone,
+        "name": "__awaiting_name__"
+    }).execute()
+
+async def handle_onboarding(user, phone, text):
+    if user["name"] == "__awaiting_name__":
+        slug = generate_slug(text)
+        supabase.table("users").update({
+            "name": text,
+            "feed_slug": slug
+        }).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone,
+            f"Nice to meet you, {text}! 👋\n\nWhat's your email address? (Used for your daily digest)")
+        return True
+    
+    if not user.get("email"):
+        slug = user.get("feed_slug") or generate_slug(user["name"])
+        supabase.table("users").update({
+            "email": text,
+            "feed_slug": slug
+        }).eq("phone_number", phone).execute()
+        
+        feed_url = f"{BASE_URL}/u/{slug}"
+        setup_url = f"{BASE_URL}/setup/{slug}"
+        
+        await send_whatsapp_message(phone,
+            f"🎉 Your SharingCircle is ready!\n\n"
+            f"📱 Your personal feed:\n{feed_url}\n\n"
+            f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
+            f"👥 Build your inner circle (up to {CIRCLE_LIMIT} people — inspired by Dunbar's research on meaningful relationships):\n{setup_url}\n\n"
+            f"Just send me any link or thought to share with your circle. Type *help* for commands.")
+        return True
+    
+    return False
+
+async def handle_command(phone, text, user):
+    cmd = text.lower().strip()
+    
+    if cmd == "help":
+        await send_whatsapp_message(phone,
+            "📖 *SharingCircle Commands*\n\n"
+            "*my circle* — see who's in your circle\n"
+            "*my links* — see your recent shares\n"
+            "*delete last* — remove your last post\n"
+            "*pause* — stop sending to your circle\n"
+            "*resume* — resume sending to your circle\n"
+            "*help* — show this message")
+        return True
+    
+    if cmd == "my circle":
+        circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
+        if not circle.data:
+            await send_whatsapp_message(phone, 
+                f"Your circle is empty! Add friends at:\n{BASE_URL}/setup/{user['feed_slug']}")
+        else:
+            names = [f"• {r['recipient_name']}" for r in circle.data]
+            await send_whatsapp_message(phone,
+                f"👥 *Your Circle* ({len(circle.data)}/{CIRCLE_LIMIT})\n\n" + "\n".join(names))
+        return True
+    
+    if cmd == "my links":
+        posts = supabase.table("posts").select("*").eq("phone_number", phone).order("created_at", desc=True).limit(5).execute()
+        if not posts.data:
+            await send_whatsapp_message(phone, "You haven't shared anything yet!")
+        else:
+            items = []
+            for p in posts.data:
+                if p["type"] == "link":
+                    items.append(f"🔗 {p['content'][:50]}...")
+                else:
+                    items.append(f"💭 {p['content'][:50]}...")
+            await send_whatsapp_message(phone, 
+                "📋 *Your recent shares:*\n\n" + "\n".join(items))
+        return True
+    
+    if cmd == "delete last":
+        posts = supabase.table("posts").select("*").eq("phone_number", phone).order("created_at", desc=True).limit(1).execute()
+        if posts.data:
+            supabase.table("posts").delete().eq("id", posts.data[0]["id"]).execute()
+            await send_whatsapp_message(phone, "✅ Last post deleted.")
+        else:
+            await send_whatsapp_message(phone, "Nothing to delete!")
+        return True
+    
+    if cmd == "pause":
+        supabase.table("users").update({"is_paused": True}).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone, "⏸ Sharing paused. Your circle won't receive new posts until you resume.")
+        return True
+    
+    if cmd == "resume":
+        supabase.table("users").update({"is_paused": False}).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone, "▶️ Sharing resumed!")
+        return True
+    
+    return False
+
+async def handle_post(phone, text, user):
+    if user.get("is_paused"):
+        await send_whatsapp_message(phone, "⏸ Your sharing is paused. Type *resume* to start sharing again.")
+        return
+    
+    url = extract_url(text)
+    is_link = url is not None
+    content = url if is_link else text
+    post_type = "link" if is_link else "thought"
+    
+    # AI processing
+    try:
+        category, summary = await ai_process(content, is_url=is_link)
+    except:
+        category = "other"
+        summary = content
+    
+    # Save post
+    supabase.table("posts").insert({
+        "phone_number": phone,
+        "type": post_type,
+        "content": content,
+        "category": category,
+        "summary": summary
+    }).execute()
+    
+    # Get circle
+    circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
+    circle_count = len(circle.data) if circle.data else 0
+    
+    emoji = "🔗" if is_link else "💭"
+    await send_whatsapp_message(phone,
+        f"{emoji} Saved! Category: *{category}*\n"
+        f"Sent to {circle_count} people in your circle.\n\n"
+        f"_{summary}_")
+
+# --- Routes ---
 
 @app.get("/")
 async def home():
@@ -63,28 +268,33 @@ async def handle_message(request: Request):
             return {"status": "no message"}
         
         message = value["messages"][0]
-        from_number = message["from"]
-        text = message.get("text", {}).get("body", "")
+        phone = message["from"]
+        text = message.get("text", {}).get("body", "").strip()
         
-        # Register user if not exists
-        existing = supabase.table("users").select("*").eq("phone_number", from_number).execute()
-        if not existing.data:
-            supabase.table("users").insert({"phone_number": from_number}).execute()
+        if not text:
+            return {"status": "no text"}
         
-        # Extract URL
-        url = extract_url(text)
+        user = get_user(phone)
         
-        if url:
-            # Save link to database
-            supabase.table("links").insert({
-                "phone_number": from_number,
-                "url": url,
-                "category": "general"
-            }).execute()
-            await send_whatsapp_message(from_number, f"✅ Link saved to your SharingCircle!\n\n{url}")
-        else:
-            await send_whatsapp_message(from_number, "👋 Welcome to SharingCircle! Send me any link and I'll save it to your feed.")
-    
+        # New user
+        if not user:
+            await handle_new_user(phone)
+            return {"status": "ok"}
+        
+        # Onboarding incomplete
+        if user["name"] == "__awaiting_name__" or not user.get("email"):
+            handled = await handle_onboarding(user, phone, text)
+            if handled:
+                return {"status": "ok"}
+        
+        # Commands
+        handled = await handle_command(phone, text, user)
+        if handled:
+            return {"status": "ok"}
+        
+        # Regular post
+        await handle_post(phone, text, user)
+        
     except Exception as e:
         print(f"Error: {e}")
     
