@@ -286,6 +286,10 @@ async def handle_message(request: Request):
             handled = await handle_onboarding(user, phone, text)
             if handled:
                 return {"status": "ok"}
+
+        if not text:
+            await send_whatsapp_message(phone, "👋 Welcome to SharingCircle! Send me any link or thought to share with your circle. Type *help* for commands.")
+            return {"status": "ok"}
         
         # Commands
         handled = await handle_command(phone, text, user)
