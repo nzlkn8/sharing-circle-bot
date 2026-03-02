@@ -106,8 +106,8 @@ def get_user(phone):
     return result.data[0] if result.data else None
 
 async def handle_new_user(phone):
-    await send_whatsapp_message(phone, 
-        "👋 Welcome to SharingCircle!\n\nI help you share links and thoughts with your closest friends — privately and beautifully.\n\nFirst, what's your name?")
+    await send_whatsapp_message(phone,
+        "👋 Welcome to SharingCircle! I help you share links and thoughts with your closest friends.\n\nWhat's your first name?")
     supabase.table("users").insert({
         "phone_number": phone,
         "name": "__awaiting_name__"
@@ -135,11 +135,11 @@ async def handle_onboarding(user, phone, text):
         setup_url = f"{BASE_URL}/setup/{slug}"
         
         await send_whatsapp_message(phone,
-            f"🎉 Your SharingCircle is ready!\n\n"
-            f"📱 Your personal feed:\n{feed_url}\n\n"
+            f"🎉 You're all set, {user['name']}!\n\n"
+            f"Your feed: {feed_url}\n"
             f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
-            f"👥 Build your inner circle (up to {CIRCLE_LIMIT} people — inspired by Dunbar's research on meaningful relationships):\n{setup_url}\n\n"
-            f"Just send me any link or thought to share with your circle. Type *help* for commands.")
+            f"Build your circle here: {setup_url}\n\n"
+            f"Send me any link or thought anytime to share with your circle.")
         return True
     
     return False
