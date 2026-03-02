@@ -150,6 +150,7 @@ async def handle_command(phone, text, user):
     if cmd == "help":
         await send_whatsapp_message(phone,
             "📖 *SharingCircle Commands*\n\n"
+            "*my feed* — get your feed URL\n"
             "*my circle* — see who's in your circle\n"
             "*my links* — see your recent shares\n"
             "*delete last* — remove your last post\n"
@@ -158,6 +159,13 @@ async def handle_command(phone, text, user):
             "*help* — show this message")
         return True
     
+    if cmd == "my feed":
+        feed_url = f"{BASE_URL}/u/{user['feed_slug']}"
+        await send_whatsapp_message(phone,
+            f"📡 Your feed: {feed_url}\n"
+            f"⚠️ Keep this link private — it's public to anyone who has it.")
+        return True
+
     if cmd == "my circle":
         circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
         if not circle.data:
@@ -214,14 +222,18 @@ async def handle_post(phone, text, user):
     is_link = url is not None
     content = url if is_link else text
     post_type = "link" if is_link else "thought"
-    
-    # AI processing
-    try:
-        category, summary = await ai_process(content, is_url=is_link)
-    except:
-        category = "other"
-        summary = content
-    
+
+    # AI processing (skip for thoughts)
+    if is_link:
+        try:
+            category, summary = await ai_process(content, is_url=True)
+        except:
+            category = "other"
+            summary = content
+    else:
+        category = "thought"
+        summary = ""
+
     # Save post
     supabase.table("posts").insert({
         "phone_number": phone,
@@ -230,16 +242,21 @@ async def handle_post(phone, text, user):
         "category": category,
         "summary": summary
     }).execute()
-    
+
     # Get circle
     circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
     circle_count = len(circle.data) if circle.data else 0
-    
+
     emoji = "🔗" if is_link else "💭"
-    await send_whatsapp_message(phone,
-        f"{emoji} Saved! Category: *{category}*\n"
-        f"Sent to {circle_count} people in your circle.\n\n"
-        f"_{summary}_")
+    if is_link:
+        await send_whatsapp_message(phone,
+            f"{emoji} Saved! Category: *{category}*\n"
+            f"Sent to {circle_count} people in your circle.\n\n"
+            f"_{summary}_")
+    else:
+        await send_whatsapp_message(phone,
+            f"{emoji} Thought saved!\n"
+            f"Sent to {circle_count} people in your circle.")
 
 # --- Routes ---
 
