@@ -16,7 +16,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 PHONE_NUMBER_ID = "918546528019408"
-BASE_URL = "https://sharing-circle.vercel.app"
+BASE_URL = "https://sharing-circle-web.vercel.app"
 CIRCLE_LIMIT = 15
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
