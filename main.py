@@ -46,7 +46,8 @@ async def send_whatsapp_message(to, message):
         "text": {"body": message}
     }
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload, headers=headers)
+        response = await client.post(url, json=payload, headers=headers)
+        print(f"[WhatsApp API] status={response.status_code} body={response.text}")
 
 async def ai_process(content, is_url=True):
     """Get category and summary from Claude API"""
