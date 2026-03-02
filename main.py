@@ -247,16 +247,13 @@ async def handle_post(phone, text, user):
     circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
     circle_count = len(circle.data) if circle.data else 0
 
-    emoji = "🔗" if is_link else "💭"
     if is_link:
         await send_whatsapp_message(phone,
-            f"{emoji} Saved! Category: *{category}*\n"
-            f"Sent to {circle_count} people in your circle.\n\n"
+            f"🔗 Saved! Sent to {circle_count} people in your circle.\n\n"
             f"_{summary}_")
     else:
         await send_whatsapp_message(phone,
-            f"{emoji} Thought saved!\n"
-            f"Sent to {circle_count} people in your circle.")
+            f"💭 Saved! Sent to {circle_count} people in your circle.")
 
 # --- Routes ---
 
