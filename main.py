@@ -66,18 +66,39 @@ async def ai_process(content, is_url=True):
     if is_url:
         url = content
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            # Spotify oEmbed
+            # Spotify
             if "open.spotify.com" in url:
                 source_type = "spotify"
                 try:
                     r = await client.get(f"https://open.spotify.com/oembed?url={url}")
                     data = r.json()
-                    title = data.get("title")
+                    title = data.get("title", "")
                     thumbnail = data.get("thumbnail_url")
-                    page_text = f"Spotify track: {title}"
+                    # Parse "Track Name - Artist" format from oEmbed title
+                    if "/track/" in url:
+                        if " - " in title:
+                            track, artist = title.rsplit(" - ", 1)
+                            summary = f"🎵 {track} by {artist}"
+                        else:
+                            summary = f"🎵 {title}"
+                        return "music", summary, title, thumbnail, source_type
+                    elif "/album/" in url:
+                        if " - " in title:
+                            album, artist = title.rsplit(" - ", 1)
+                            summary = f"💿 {album} by {artist}"
+                        else:
+                            summary = f"💿 {title}"
+                        return "music", summary, title, thumbnail, source_type
+                    elif "/playlist/" in url:
+                        summary = f"🎵 Playlist: {title}"
+                        return "music", summary, title, thumbnail, source_type
+                    elif "/episode/" in url:
+                        # Podcast episode — get description and pass to AI
+                        description = data.get("description", "")
+                        page_text = f"Podcast episode: {title}\n{description}"
                 except Exception:
-                    pass
-            # YouTube oEmbed
+                    page_text = url
+            # YouTube oEmbed — get title then summarize with AI
             elif "youtube.com" in url or "youtu.be" in url:
                 source_type = "youtube"
                 try:
@@ -106,7 +127,35 @@ async def ai_process(content, is_url=True):
                 except Exception:
                     page_text = url
 
-        prompt = f"""Analyze this web content and provide:
+        is_youtube = "youtube.com" in url or "youtu.be" in url
+        is_podcast = "open.spotify.com" in url and "/episode/" in url
+        if is_youtube:
+            prompt = f"""Analyze this YouTube video and provide:
+1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+2. Exactly 1-2 bullet points about what this video is likely about, based on the title
+
+Content: {page_text}
+
+Respond in this exact format:
+CATEGORY: [category]
+BULLETS:
+• [point 1]
+• [optional point 2]"""
+        elif is_podcast:
+            prompt = f"""Analyze this podcast episode and provide:
+1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+2. Exactly 2-3 bullet points summarizing what this episode is about
+
+Content: {page_text}
+
+Respond in this exact format:
+CATEGORY: [category]
+BULLETS:
+• [point 1]
+• [point 2]
+• [optional point 3]"""
+        else:
+            prompt = f"""Analyze this web content and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
 2. Exactly 2-3 bullet points summarizing what this is about (each bullet on its own line starting with •)
 
