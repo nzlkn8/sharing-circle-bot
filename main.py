@@ -3,7 +3,7 @@ import re
 import random
 import string
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from supabase import create_client
 
@@ -20,6 +20,8 @@ BASE_URL = "https://sharing-circle-web.vercel.app"
 CIRCLE_LIMIT = 15
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+processed_messages = set()
 
 # --- Helpers ---
 
@@ -271,8 +273,30 @@ async def verify(request: Request):
         return PlainTextResponse(content=challenge, status_code=200)
     return PlainTextResponse(content="Verification failed", status_code=403)
 
+async def process_message(phone, text, message_id):
+    try:
+        user = get_user(phone)
+
+        if not user:
+            await handle_new_user(phone)
+            return
+
+        if user["name"] is None or user["name"] == "__awaiting_name__" or not user.get("email"):
+            await handle_onboarding(user, phone, text)
+            return
+
+        handled = await handle_command(phone, text, user)
+        if handled:
+            return
+
+        await handle_post(phone, text, user)
+
+    except Exception as e:
+        print(f"Error processing message {message_id}: {e}")
+
+
 @app.post("/webhook")
-async def handle_message(request: Request):
+async def handle_message(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     try:
         entry = data["entry"][0]
@@ -283,27 +307,20 @@ async def handle_message(request: Request):
             return {"status": "no message"}
 
         message = value["messages"][0]
+        message_id = message["id"]
+
+        if message_id in processed_messages:
+            print(f"[Dedup] Skipping duplicate message {message_id}")
+            return {"status": "ok"}
+        processed_messages.add(message_id)
+
         phone = message["from"]
         text = message.get("text", {}).get("body", "").strip()
 
         if not text:
-            return {"status": "no text"}
-
-        user = get_user(phone)
-
-        if not user:
-            await handle_new_user(phone)
             return {"status": "ok"}
 
-        if user["name"] is None or user["name"] == "__awaiting_name__" or not user.get("email"):
-            await handle_onboarding(user, phone, text)
-            return {"status": "ok"}
-
-        handled = await handle_command(phone, text, user)
-        if handled:
-            return {"status": "ok"}
-
-        await handle_post(phone, text, user)
+        background_tasks.add_task(process_message, phone, text, message_id)
 
     except Exception as e:
         print(f"Error: {e}")
