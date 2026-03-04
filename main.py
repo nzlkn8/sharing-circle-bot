@@ -17,7 +17,6 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 PHONE_NUMBER_ID = "918546528019408"
 BASE_URL = "https://sharing-circle-web.vercel.app"
-CIRCLE_LIMIT = 15
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -51,18 +50,74 @@ async def send_whatsapp_message(to, message):
         response = await client.post(url, json=payload, headers=headers)
         print(f"[WhatsApp API] status={response.status_code} body={response.text}")
 
-async def ai_process(content, is_url=True):
-    """Get category and summary from Claude API"""
-    if is_url:
-        prompt = f"""Analyze this URL and provide:
-1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. A 2-3 sentence summary of what this link is likely about based on the URL
+def strip_html(html):
+    """Strip HTML tags and collapse whitespace."""
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-URL: {content}
+async def ai_process(content, is_url=True):
+    """Get category, summary, title, thumbnail, and source_type from real content."""
+    title = None
+    thumbnail = None
+    source_type = "link"
+    page_text = ""
+
+    if is_url:
+        url = content
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            # Spotify oEmbed
+            if "open.spotify.com" in url:
+                source_type = "spotify"
+                try:
+                    r = await client.get(f"https://open.spotify.com/oembed?url={url}")
+                    data = r.json()
+                    title = data.get("title")
+                    thumbnail = data.get("thumbnail_url")
+                    page_text = f"Spotify track: {title}"
+                except Exception:
+                    pass
+            # YouTube oEmbed
+            elif "youtube.com" in url or "youtu.be" in url:
+                source_type = "youtube"
+                try:
+                    r = await client.get(f"https://www.youtube.com/oembed?url={url}&format=json")
+                    data = r.json()
+                    title = data.get("title")
+                    thumbnail = data.get("thumbnail_url")
+                    page_text = f"YouTube video: {title}"
+                except Exception:
+                    pass
+            # Generic URL — fetch and extract text
+            if not page_text:
+                try:
+                    r = await client.get(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    })
+                    page_text = strip_html(r.text)[:3000]
+                    # Try to pull <title> for display
+                    title_match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
+                    if title_match and not title:
+                        title = title_match.group(1).strip()
+                    # Try og:image for thumbnail
+                    thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
+                    if thumb_match and not thumbnail:
+                        thumbnail = thumb_match.group(1).strip()
+                except Exception:
+                    page_text = url
+
+        prompt = f"""Analyze this web content and provide:
+1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+2. Exactly 2-3 bullet points summarizing what this is about (each bullet on its own line starting with •)
+
+Content: {page_text}
 
 Respond in this exact format:
 CATEGORY: [category]
-SUMMARY: [summary]"""
+BULLETS:
+• [point 1]
+• [point 2]
+• [optional point 3]"""
     else:
         prompt = f"""Analyze this thought/message and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
@@ -84,24 +139,33 @@ SUMMARY: [summary]"""
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
+                "max_tokens": 300,
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=30
         )
         result = response.json()
         text = result["content"][0]["text"]
-        
+
         category = "other"
         summary = content
-        
+        in_bullets = False
+        bullet_lines = []
+
         for line in text.split('\n'):
             if line.startswith("CATEGORY:"):
                 category = line.replace("CATEGORY:", "").strip().lower()
+            elif line.startswith("BULLETS:"):
+                in_bullets = True
+            elif in_bullets and line.strip().startswith("•"):
+                bullet_lines.append(line.strip())
             elif line.startswith("SUMMARY:"):
                 summary = line.replace("SUMMARY:", "").strip()
-        
-        return category, summary
+
+        if bullet_lines:
+            summary = "\n".join(bullet_lines)
+
+        return category, summary, title, thumbnail, source_type
 
 def get_user(phone):
     result = supabase.table("users").select("*").eq("phone_number", phone).execute()
@@ -109,7 +173,13 @@ def get_user(phone):
 
 async def handle_new_user(phone):
     await send_whatsapp_message(phone,
-        "👋 Welcome to SharingCircle! I help you share links and thoughts with your closest friends.\n\nWhat's your first name?")
+        "👋 Welcome to SharingCircle!\n\n"
+        "The best things you find online — music, articles, ideas — deserve better than getting lost in a group chat.\n\n"
+        "Here's how it works:\n"
+        "- Send me any link or thought → it goes to your circle\n"
+        "- Your circle gets a beautiful weekly digest every Sunday\n"
+        "- Everyone has their own personal feed\n\n"
+        "Let's get you set up. What's your first name?")
     supabase.table("users").insert({
         "phone_number": phone,
         "name": "__awaiting_name__"
@@ -138,10 +208,10 @@ async def handle_onboarding(user, phone, text):
         
         await send_whatsapp_message(phone,
             f"🎉 You're all set, {user['name']}!\n\n"
-            f"Your feed: {feed_url}\n"
+            f"📱 Your feed: {feed_url}\n"
             f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
-            f"Build your circle here: {setup_url}\n\n"
-            f"Send me any link or thought anytime to share with your circle.")
+            f"👥 Add friends to your circle: {setup_url}\n\n"
+            f"Send me any link to try it now!")
         return True
     
     return False
@@ -176,7 +246,7 @@ async def handle_command(phone, text, user):
         else:
             names = [f"• {r['recipient_name']}" for r in circle.data]
             await send_whatsapp_message(phone,
-                f"👥 *Your Circle* ({len(circle.data)}/{CIRCLE_LIMIT})\n\n" + "\n".join(names))
+                f"👥 *Your Circle* ({len(circle.data)} people)\n\n" + "\n".join(names))
         return True
     
     if cmd == "my links":
@@ -226,9 +296,12 @@ async def handle_post(phone, text, user):
     post_type = "link" if is_link else "thought"
 
     # AI processing (skip for thoughts)
+    title = None
+    thumbnail = None
+    source_type = post_type
     if is_link:
         try:
-            category, summary = await ai_process(content, is_url=True)
+            category, summary, title, thumbnail, source_type = await ai_process(content, is_url=True)
         except:
             category = "other"
             summary = content
@@ -242,7 +315,10 @@ async def handle_post(phone, text, user):
         "type": post_type,
         "content": content,
         "category": category,
-        "summary": summary
+        "summary": summary,
+        "title": title,
+        "thumbnail": thumbnail,
+        "source_type": source_type
     }).execute()
 
     # Get circle
@@ -250,9 +326,9 @@ async def handle_post(phone, text, user):
     circle_count = len(circle.data) if circle.data else 0
 
     if is_link:
+        display_title = title or content
         await send_whatsapp_message(phone,
-            f"🔗 Saved! Sent to {circle_count} people in your circle.\n\n"
-            f"_{summary}_")
+            f"🔗 {display_title}\nSaved! Sent to {circle_count} people.\n\n{summary}")
     else:
         await send_whatsapp_message(phone,
             f"💭 Saved! Sent to {circle_count} people in your circle.")
