@@ -74,11 +74,10 @@ async def ai_process(content, is_url=True):
                     data = r.json()
                     title = data.get("title", "")
                     thumbnail = data.get("thumbnail_url")
-                    # Parse "Track Name - Artist" format from oEmbed title
+                    author_name = data.get("author_name", "")
                     if "/track/" in url:
-                        if " - " in title:
-                            track, artist = title.rsplit(" - ", 1)
-                            summary = f"🎵 {track} by {artist}"
+                        if author_name:
+                            summary = f"🎵 {title} by {author_name}"
                         else:
                             summary = f"🎵 {title}"
                         return "music", summary, title, thumbnail, source_type
