@@ -4,11 +4,14 @@ import random
 import string
 import asyncio
 import httpx
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from supabase import create_client
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 app = FastAPI()
+scheduler = AsyncIOScheduler()
 
 # Environment variables
 MY_TOKEN = "SharingCircle2026"
@@ -227,6 +230,14 @@ def get_user(phone):
     result = supabase.table("users").select("*").eq("phone_number", phone).execute()
     return result.data[0] if result.data else None
 
+def schedule_message(phone, message, send_at):
+    supabase.table("scheduled_messages").insert({
+        "phone_number": phone,
+        "message": message,
+        "send_at": send_at.isoformat(),
+        "sent": False,
+    }).execute()
+
 async def handle_new_user(phone):
     await send_whatsapp_message(phone,
         "👋 Welcome to SharingCircle!\n\n"
@@ -251,30 +262,65 @@ async def handle_onboarding(user, phone, text):
         await send_whatsapp_message(phone,
             f"Nice to meet you, {text}! 👋\n\nWhat's your email address? (Used for your daily digest)")
         return True
-    
+
     if not user.get("email"):
         slug = user.get("feed_slug") or generate_slug(user["name"])
         supabase.table("users").update({
             "email": text,
             "feed_slug": slug
         }).eq("phone_number", phone).execute()
-        
+
         feed_url = f"{BASE_URL}/u/{slug}"
         setup_url = f"{BASE_URL}/setup/{slug}"
-        
+
+        # Send feed info message
         await send_whatsapp_message(phone,
-            f"🎉 You're all set, {user['name']}!\n\n"
             f"📱 Your feed: {feed_url}\n"
             f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
-            f"👥 Add friends to your circle by sending their contact card (tap 📎 → Contact) or visit: {setup_url}\n\n"
-            f"Send me any link to try it now!")
+            f"👥 Add friends to your circle at: {setup_url}")
+
+        # Immediately: forwardable invite as two separate messages
+        await send_whatsapp_message(phone,
+            "🎉 You're all set! Share SharingCircle with friends by forwarding the next message 👇")
+        await send_whatsapp_message(phone,
+            "Hey! I've been using SharingCircle to share links and ideas with my closest friends. "
+            "It's like a private feed for your inner circle — music, articles, ideas worth sharing. "
+            "Message this number to join: wa.me/16472039443")
+
+        # Immediately: prompt to try it
+        await send_whatsapp_message(phone,
+            "Try it now — send me any link you've found interesting lately!")
+
+        now = datetime.now(timezone.utc)
+
+        # 6 hours later: remind to add friends
+        schedule_message(
+            phone,
+            f"👥 Don't forget to add friends to your circle! Send me a contact card (tap 📎 → Contact) or visit {setup_url}",
+            now + timedelta(hours=6)
+        )
+
+        # Day 2: nudge to share
+        schedule_message(
+            phone,
+            "💡 Anything you find interesting — articles, music, ideas — just send it here and it goes straight to your circle!",
+            now + timedelta(days=2),
+        )
+
+        # Day 4: nudge to add friends
+        schedule_message(
+            phone,
+            f"Your circle is waiting! Add friends so they can see what you share: {setup_url}",
+            now + timedelta(days=4),
+        )
+
         return True
-    
+
     return False
 
 async def handle_command(phone, text, user):
     cmd = text.lower().strip()
-    
+
     if cmd == "help":
         await send_whatsapp_message(phone,
             "📖 *SharingCircle Commands*\n\n"
@@ -286,7 +332,7 @@ async def handle_command(phone, text, user):
             "*resume* — resume sending to your circle\n"
             "*help* — show this message")
         return True
-    
+
     if cmd == "my feed":
         feed_url = f"{BASE_URL}/u/{user['feed_slug']}"
         await send_whatsapp_message(phone,
@@ -297,14 +343,14 @@ async def handle_command(phone, text, user):
     if cmd == "my circle":
         circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
         if not circle.data:
-            await send_whatsapp_message(phone, 
+            await send_whatsapp_message(phone,
                 f"Your circle is empty! Add friends at:\n{BASE_URL}/setup/{user['feed_slug']}")
         else:
             names = [f"• {r['recipient_name']}" for r in circle.data]
             await send_whatsapp_message(phone,
                 f"👥 *Your Circle* ({len(circle.data)} people)\n\n" + "\n".join(names))
         return True
-    
+
     if cmd == "my links":
         posts = supabase.table("posts").select("*").eq("phone_number", phone).order("created_at", desc=True).limit(5).execute()
         if not posts.data:
@@ -316,10 +362,10 @@ async def handle_command(phone, text, user):
                     items.append(f"🔗 {p['content'][:50]}...")
                 else:
                     items.append(f"💭 {p['content'][:50]}...")
-            await send_whatsapp_message(phone, 
+            await send_whatsapp_message(phone,
                 "📋 *Your recent shares:*\n\n" + "\n".join(items))
         return True
-    
+
     if cmd == "delete last":
         posts = supabase.table("posts").select("*").eq("phone_number", phone).order("created_at", desc=True).limit(1).execute()
         if posts.data:
@@ -328,24 +374,24 @@ async def handle_command(phone, text, user):
         else:
             await send_whatsapp_message(phone, "Nothing to delete!")
         return True
-    
+
     if cmd == "pause":
         supabase.table("users").update({"is_paused": True}).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone, "⏸ Sharing paused. Your circle won't receive new posts until you resume.")
         return True
-    
+
     if cmd == "resume":
         supabase.table("users").update({"is_paused": False}).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone, "▶️ Sharing resumed!")
         return True
-    
+
     return False
 
 async def handle_post(phone, text, user):
     if user.get("is_paused"):
         await send_whatsapp_message(phone, "⏸ Your sharing is paused. Type *resume* to start sharing again.")
         return
-    
+
     url = extract_url(text)
     is_link = url is not None
     content = url if is_link else text
@@ -402,10 +448,9 @@ async def handle_contact_card(phone, contacts):
 
     contact_phone = normalize_phone(phones[0].get("phone", ""))
 
-    circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
-    existing_phones = [normalize_phone(r.get("recipient_phone", "")) for r in (circle.data or [])]
-
-    if contact_phone in existing_phones:
+    # Query Supabase fresh — never use cached data
+    existing = supabase.table("circle").select("id").eq("sender_phone", phone).eq("recipient_phone", contact_phone).execute()
+    if existing.data:
         await send_whatsapp_message(phone, f"👤 {name} is already in your circle!")
         return
 
@@ -422,7 +467,28 @@ async def process_contact_card(phone, contacts, message_id):
     except Exception as e:
         print(f"Error processing contact card {message_id}: {e}")
 
+# --- Scheduled message processor ---
+
+async def check_scheduled_messages():
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        result = supabase.table("scheduled_messages").select("*").eq("sent", False).lte("send_at", now).execute()
+        for msg in (result.data or []):
+            await send_whatsapp_message(msg["phone_number"], msg["message"])
+            supabase.table("scheduled_messages").update({"sent": True}).eq("id", msg["id"]).execute()
+    except Exception as e:
+        print(f"[Scheduler] Error: {e}")
+
 # --- Routes ---
+
+@app.on_event("startup")
+async def startup_event():
+    scheduler.add_job(check_scheduled_messages, 'interval', minutes=15)
+    scheduler.start()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    scheduler.shutdown()
 
 @app.get("/")
 async def home():
@@ -459,6 +525,13 @@ async def process_message(phone, text, message_id):
                 "recipient_email": text.strip()
             }).execute()
             await send_whatsapp_message(phone, f"✅ {pending['name']} added to your circle!")
+
+            # Notify the recipient
+            await send_whatsapp_message(
+                pending["phone"],
+                f"👋 Hey! {user['name']} added you to their SharingCircle — a private feed where they share links, music and ideas with their closest friends.\n\n"
+                f"Message this number to set up your own circle and see what they're sharing: wa.me/16472039443"
+            )
             return
 
         handled = await handle_command(phone, text, user)
