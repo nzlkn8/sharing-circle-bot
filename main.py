@@ -22,8 +22,15 @@ BASE_URL = "https://sharing-circle-web.vercel.app"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 processed_messages = set()
+pending_contacts = {}
 
 # --- Helpers ---
+
+def normalize_phone(phone):
+    return re.sub(r'\D', '', phone)
+
+def is_valid_email(text):
+    return bool(re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', text.strip()))
 
 def extract_url(text):
     pattern = r'https?://[^\s]+'
@@ -259,7 +266,7 @@ async def handle_onboarding(user, phone, text):
             f"🎉 You're all set, {user['name']}!\n\n"
             f"📱 Your feed: {feed_url}\n"
             f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
-            f"👥 Add friends to your circle: {setup_url}\n\n"
+            f"👥 Add friends to your circle by sending their contact card (tap 📎 → Contact) or visit: {setup_url}\n\n"
             f"Send me any link to try it now!")
         return True
     
@@ -385,6 +392,36 @@ async def handle_post(phone, text, user):
                 pass
         asyncio.create_task(enrich_post())
 
+async def handle_contact_card(phone, contacts):
+    contact = contacts[0]
+    name = contact.get("name", {}).get("formatted_name", "Unknown")
+    phones = contact.get("phones", [])
+    if not phones:
+        await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number.")
+        return
+
+    contact_phone = normalize_phone(phones[0].get("phone", ""))
+
+    circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
+    existing_phones = [normalize_phone(r.get("recipient_phone", "")) for r in (circle.data or [])]
+
+    if contact_phone in existing_phones:
+        await send_whatsapp_message(phone, f"👤 {name} is already in your circle!")
+        return
+
+    pending_contacts[phone] = {"name": name, "phone": contact_phone}
+    await send_whatsapp_message(phone, f"Got {name}! What's their email address?")
+
+async def process_contact_card(phone, contacts, message_id):
+    try:
+        user = get_user(phone)
+        if not user or user["name"] == "__awaiting_name__" or not user.get("email"):
+            await send_whatsapp_message(phone, "Please finish setting up your account first!")
+            return
+        await handle_contact_card(phone, contacts)
+    except Exception as e:
+        print(f"Error processing contact card {message_id}: {e}")
+
 # --- Routes ---
 
 @app.get("/")
@@ -411,6 +448,17 @@ async def process_message(phone, text, message_id):
 
         if user["name"] is None or user["name"] == "__awaiting_name__" or not user.get("email"):
             await handle_onboarding(user, phone, text)
+            return
+
+        if phone in pending_contacts and is_valid_email(text):
+            pending = pending_contacts.pop(phone)
+            supabase.table("circle").insert({
+                "sender_phone": phone,
+                "recipient_name": pending["name"],
+                "recipient_phone": pending["phone"],
+                "recipient_email": text.strip()
+            }).execute()
+            await send_whatsapp_message(phone, f"✅ {pending['name']} added to your circle!")
             return
 
         handled = await handle_command(phone, text, user)
@@ -443,6 +491,14 @@ async def handle_message(request: Request, background_tasks: BackgroundTasks):
         processed_messages.add(message_id)
 
         phone = message["from"]
+        msg_type = message.get("type")
+
+        if msg_type == "contacts":
+            contacts = message.get("contacts", [])
+            if contacts:
+                background_tasks.add_task(process_contact_card, phone, contacts, message_id)
+            return {"status": "ok"}
+
         text = message.get("text", {}).get("body", "").strip()
 
         if not text:
