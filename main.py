@@ -2,6 +2,7 @@ import os
 import re
 import random
 import string
+import asyncio
 import httpx
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
@@ -343,43 +344,46 @@ async def handle_post(phone, text, user):
     content = url if is_link else text
     post_type = "link" if is_link else "thought"
 
-    # AI processing (skip for thoughts)
-    title = None
-    thumbnail = None
-    source_type = post_type
-    if is_link:
-        try:
-            category, summary, title, thumbnail, source_type = await ai_process(content, is_url=True)
-        except:
-            category = "other"
-            summary = content
-    else:
-        category = "thought"
-        summary = ""
-
-    # Save post
-    supabase.table("posts").insert({
+    # Save post immediately with placeholder AI data
+    category = "other" if is_link else "thought"
+    result = supabase.table("posts").insert({
         "phone_number": phone,
         "type": post_type,
         "content": content,
         "category": category,
-        "summary": summary,
-        "title": title,
-        "thumbnail": thumbnail,
-        "source_type": source_type
+        "summary": "",
+        "title": None,
+        "thumbnail": None,
+        "source_type": post_type
     }).execute()
+    post_id = result.data[0]["id"] if result.data else None
 
     # Get circle
     circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
     circle_count = len(circle.data) if circle.data else 0
 
     if is_link:
-        display_title = title or content
         await send_whatsapp_message(phone,
-            f"🔗 {display_title}\nSaved! Sent to {circle_count} people.\n\n{summary}")
+            f"🔗 Saved! Sent to {circle_count} people in your circle.")
     else:
         await send_whatsapp_message(phone,
             f"💭 Saved! Sent to {circle_count} people in your circle.")
+
+    # Run AI processing in background so feed gets enriched data
+    if is_link and post_id:
+        async def enrich_post():
+            try:
+                category, summary, title, thumbnail, source_type = await ai_process(content, is_url=True)
+                supabase.table("posts").update({
+                    "category": category,
+                    "summary": summary,
+                    "title": title,
+                    "thumbnail": thumbnail,
+                    "source_type": source_type
+                }).eq("id", post_id).execute()
+            except:
+                pass
+        asyncio.create_task(enrich_post())
 
 # --- Routes ---
 
