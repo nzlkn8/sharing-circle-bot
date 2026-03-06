@@ -268,35 +268,12 @@ async def handle_onboarding(user, phone, text):
         slug = user.get("feed_slug") or generate_slug(user["name"])
         supabase.table("users").update({
             "email": text,
-            "feed_slug": slug
+            "feed_slug": slug,
+            "onboarding_step": "awaiting_first_link"
         }).eq("phone_number", phone).execute()
 
-        feed_url = f"{BASE_URL}/u/{slug}"
-        setup_url = f"{BASE_URL}/setup/{slug}"
-
-        name = user["name"]
         await send_whatsapp_message(phone,
-            f"🎉 You're all set, {name}!\n\n"
-            f"📱 Your feed: {feed_url}\n\n"
-            f"👥 Add friends to your circle:\n"
-            f"- On the web: {setup_url}\n"
-            f"- In this chat: tap + → Contact and share their contact card\n\n"
-            f"Type *help* anytime for quick commands.\n\n"
-            f"👇 Forward the next message to friends you'd like to add you to their circle!")
-
-        await send_whatsapp_message(phone,
-            "Hey! I've been using SharingCircle to share links and ideas with my closest friends. "
-            "It's like a private feed for your inner circle — music, articles, ideas worth sharing. "
-            "Message this number to join: wa.me/16472039443")
-
-        now = datetime.now(timezone.utc)
-
-        # 2 hours later: prompt to share a link
-        schedule_message(
-            phone,
-            "Once you've added some friends, send me any link you've been enjoying lately and I'll share it with your circle! 🔗",
-            now + timedelta(hours=2)
-        )
+            "Great! Now share a link — a song, podcast, or article you've been enjoying lately. This will be your first share! 🔗")
 
         return True
 
@@ -630,6 +607,63 @@ async def process_message(phone, text, message_id):
 
         if user["name"] is None or user["name"] == "__awaiting_name__" or not user.get("email"):
             await handle_onboarding(user, phone, text)
+            return
+
+        if user.get("onboarding_step") == "awaiting_first_link":
+            name = user["name"]
+            slug = user["feed_slug"]
+            feed_url = f"{BASE_URL}/u/{slug}"
+            setup_url = f"{BASE_URL}/setup/{slug}"
+
+            url = extract_url(text)
+            is_link = url is not None
+            content = url if is_link else text
+            post_type = "link" if is_link else "thought"
+            category = "other" if is_link else "thought"
+
+            result = supabase.table("posts").insert({
+                "phone_number": phone,
+                "type": post_type,
+                "content": content,
+                "category": category,
+                "summary": "",
+                "title": None,
+                "thumbnail": None,
+                "source_type": post_type
+            }).execute()
+            post_id = result.data[0]["id"] if result.data else None
+
+            supabase.table("users").update({"onboarding_step": "complete"}).eq("phone_number", phone).execute()
+
+            await send_whatsapp_message(phone,
+                f"🎉 You're all set, {name}! Here's your personal feed:\n"
+                f"{feed_url}\n\n"
+                f"👥 Now let's add some friends to your circle so they can see what you share:\n"
+                f"- Tap + → Contact in this chat to share a contact card\n"
+                f"- Or manage your circle on the web: {setup_url}")
+
+            await send_whatsapp_message(phone,
+                "Quick commands:\n"
+                "*help* — see all commands\n"
+                "*my circle* — see who's in your circle\n"
+                "*my links* — see your recent shares\n"
+                "*my feed* — get your feed link")
+
+            if is_link and post_id:
+                async def enrich_first_post():
+                    try:
+                        cat, summary, title, thumbnail, source_type = await ai_process(content, is_url=True)
+                        supabase.table("posts").update({
+                            "category": cat,
+                            "summary": summary,
+                            "title": title,
+                            "thumbnail": thumbnail,
+                            "source_type": source_type
+                        }).eq("id", post_id).execute()
+                    except:
+                        pass
+                asyncio.create_task(enrich_first_post())
+
             return
 
         if phone in pending_contacts and is_valid_email(text):
