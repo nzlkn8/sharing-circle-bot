@@ -19,6 +19,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 PHONE_NUMBER_ID = "918546528019408"
 BASE_URL = "https://sharing-circle-web.vercel.app"
 
@@ -241,12 +242,12 @@ def schedule_message(phone, message, send_at):
 async def handle_new_user(phone):
     await send_whatsapp_message(phone,
         "👋 Welcome to SharingCircle!\n\n"
-        "The best things you find online — music, articles, ideas — deserve better than getting lost in a group chat.\n\n"
-        "Here's how it works:\n"
-        "- Send me any link or thought → it goes to your circle\n"
-        "- Your circle gets a beautiful weekly digest every Sunday\n"
-        "- Everyone has their own personal feed\n\n"
-        "Let's get you set up. What's your first name?")
+        "Share your favorite things with your favorite people — articles, music, podcasts, ideas.\n\n"
+        "How it works:\n"
+        "- Add friends you want to share with\n"
+        "- Send links here anytime\n"
+        "- Friends see your shares in their feed + a weekly digest every Sunday\n\n"
+        "What's your first name?")
     supabase.table("users").insert({
         "phone_number": phone,
         "name": "__awaiting_name__"
@@ -260,7 +261,7 @@ async def handle_onboarding(user, phone, text):
             "feed_slug": slug
         }).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone,
-            f"Nice to meet you, {text}! 👋\n\nWhat's your email address? (Used for your daily digest)")
+            f"Nice to meet you, {text}! 👋\n\nWhat's your email address? (We'll send you a weekly digest every Sunday)")
         return True
 
     if not user.get("email"):
@@ -276,12 +277,12 @@ async def handle_onboarding(user, phone, text):
         name = user["name"]
         await send_whatsapp_message(phone,
             f"🎉 You're all set, {name}!\n\n"
-            f"📱 Your feed: {feed_url}\n"
-            f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
-            f"👥 First step: add friends to your circle so they can see what you share.\n\n"
-            f"Two ways to add friends:\n"
+            f"📱 Your feed: {feed_url}\n\n"
+            f"👥 Add friends to your circle:\n"
             f"- On the web: {setup_url}\n"
-            f"- In this chat: tap the + button → Contact, and share their contact card")
+            f"- In this chat: tap + → Contact and share their contact card\n\n"
+            f"Type *help* anytime for quick commands.\n\n"
+            f"👇 Forward the next message to friends you'd like to add you to their circle!")
 
         await send_whatsapp_message(phone,
             "Hey! I've been using SharingCircle to share links and ideas with my closest friends. "
@@ -450,6 +451,113 @@ async def process_contact_card(phone, contacts, message_id):
     except Exception as e:
         print(f"Error processing contact card {message_id}: {e}")
 
+# --- Digest ---
+
+async def send_digest(phone_number, period):
+    try:
+        user_result = supabase.table("users").select("*").eq("phone_number", phone_number).execute()
+        if not user_result.data:
+            return
+        user = user_result.data[0]
+        email = user.get("email")
+        if not email:
+            return
+
+        circle_result = supabase.table("circle").select("*").eq("recipient_phone", phone_number).execute()
+        if not circle_result.data:
+            return
+
+        sender_phones = [row["sender_phone"] for row in circle_result.data]
+        sender_names = {row["sender_phone"]: row["recipient_name"] for row in circle_result.data}
+
+        # Also pull the actual sender's name from users table for accuracy
+        for sp in sender_phones:
+            u = supabase.table("users").select("name").eq("phone_number", sp).execute()
+            if u.data and u.data[0].get("name"):
+                sender_names[sp] = u.data[0]["name"]
+
+        days = 7 if period == "weekly" else 1
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        posts_result = supabase.table("posts").select("*").in_("phone_number", sender_phones).gte("created_at", cutoff).order("created_at", desc=True).execute()
+        posts = posts_result.data or []
+
+        if not posts:
+            return
+
+        # Group by sender
+        by_sender = {}
+        for post in posts:
+            sp = post["phone_number"]
+            by_sender.setdefault(sp, []).append(post)
+
+        period_label = "this week" if period == "weekly" else "today"
+        subject = f"Your SharingCircle weekly digest 🔗" if period == "weekly" else "Your SharingCircle daily digest 🔗"
+
+        sender_sections = ""
+        for sp, sender_posts in by_sender.items():
+            sname = sender_names.get(sp, sp)
+            items_html = ""
+            for p in sender_posts:
+                thumbnail_html = ""
+                if p.get("thumbnail"):
+                    thumbnail_html = f'<img src="{p["thumbnail"]}" style="width:80px;height:60px;object-fit:cover;border-radius:4px;margin-right:12px;flex-shrink:0;" />'
+                title = p.get("title") or p.get("content", "")[:80]
+                content_url = p.get("content", "")
+                summary = p.get("summary", "")
+                bullets_html = ""
+                if summary:
+                    for bullet in summary.split("\n"):
+                        b = bullet.strip().lstrip("•").strip()
+                        if b:
+                            bullets_html += f'<li style="margin:2px 0;color:#555;font-size:14px;">{b}</li>'
+                    if bullets_html:
+                        bullets_html = f'<ul style="margin:6px 0 0 0;padding-left:18px;">{bullets_html}</ul>'
+                items_html += f'''
+                <div style="display:flex;align-items:flex-start;margin-bottom:16px;">
+                    {thumbnail_html}
+                    <div>
+                        <a href="{content_url}" style="font-weight:bold;color:#2c2c2c;text-decoration:none;font-size:15px;">{title}</a>
+                        {bullets_html}
+                    </div>
+                </div>'''
+            sender_sections += f'''
+            <div style="margin-bottom:28px;">
+                <h3 style="color:#c0614a;font-size:16px;margin:0 0 12px 0;border-bottom:1px solid #e8ddd6;padding-bottom:6px;">{sname}</h3>
+                {items_html}
+            </div>'''
+
+        html_body = f'''
+        <div style="background:#faf8f5;padding:40px 20px;font-family:Georgia,serif;">
+            <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;padding:36px;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+                <h1 style="color:#2c2c2c;font-size:26px;margin:0 0 4px 0;">SharingCircle</h1>
+                <p style="color:#888;font-size:15px;margin:0 0 28px 0;">Here's what your circle shared {period_label}</p>
+                {sender_sections}
+                <hr style="border:none;border-top:1px solid #e8ddd6;margin:28px 0 16px 0;" />
+                <p style="color:#aaa;font-size:12px;margin:0;">You're receiving this because someone added you to their SharingCircle.</p>
+            </div>
+        </div>'''
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "from": "SharingCircle <onboarding@resend.dev>",
+                    "to": [email],
+                    "subject": subject,
+                    "html": html_body
+                },
+                timeout=15
+            )
+            print(f"[Digest] Sent to {email} ({period}): status={resp.status_code}")
+    except Exception as e:
+        print(f"[Digest] Error for {phone_number}: {e}")
+
+
 # --- Scheduled message processor ---
 
 async def check_scheduled_messages():
@@ -464,9 +572,21 @@ async def check_scheduled_messages():
 
 # --- Routes ---
 
+async def run_daily_digest():
+    users = supabase.table("users").select("phone_number").eq("digest_daily", True).execute()
+    for u in (users.data or []):
+        await send_digest(u["phone_number"], "daily")
+
+async def run_weekly_digest():
+    users = supabase.table("users").select("phone_number").eq("digest_weekly", True).execute()
+    for u in (users.data or []):
+        await send_digest(u["phone_number"], "weekly")
+
 @app.on_event("startup")
 async def startup_event():
     scheduler.add_job(check_scheduled_messages, 'interval', minutes=15)
+    scheduler.add_job(run_daily_digest, 'cron', hour=23, minute=0)
+    scheduler.add_job(run_weekly_digest, 'cron', day_of_week='sun', hour=15, minute=0)
     scheduler.start()
 
 @app.on_event("shutdown")
@@ -476,6 +596,19 @@ async def shutdown_event():
 @app.get("/")
 async def home():
     return {"status": "SharingCircle Brain is Online"}
+
+@app.get("/trigger-digest/{phone_number}")
+async def trigger_digest(phone_number: str):
+    await send_digest(phone_number, "weekly")
+    return {"status": "sent", "phone_number": phone_number}
+
+@app.get("/trigger-digest-all")
+async def trigger_digest_all():
+    users = supabase.table("users").select("phone_number").eq("digest_weekly", True).execute()
+    phones = [u["phone_number"] for u in (users.data or [])]
+    for phone in phones:
+        await send_digest(phone, "weekly")
+    return {"status": "sent", "count": len(phones)}
 
 @app.get("/webhook")
 async def verify(request: Request):
