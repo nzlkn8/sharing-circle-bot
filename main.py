@@ -273,45 +273,28 @@ async def handle_onboarding(user, phone, text):
         feed_url = f"{BASE_URL}/u/{slug}"
         setup_url = f"{BASE_URL}/setup/{slug}"
 
-        # Send feed info message
+        name = user["name"]
         await send_whatsapp_message(phone,
+            f"🎉 You're all set, {name}!\n\n"
             f"📱 Your feed: {feed_url}\n"
             f"⚠️ Keep this link private — it's public to anyone who has it.\n\n"
-            f"👥 Add friends to your circle at: {setup_url}")
+            f"👥 First step: add friends to your circle so they can see what you share.\n\n"
+            f"Two ways to add friends:\n"
+            f"- On the web: {setup_url}\n"
+            f"- In this chat: tap the + button → Contact, and share their contact card")
 
-        # Immediately: forwardable invite as two separate messages
-        await send_whatsapp_message(phone,
-            "🎉 You're all set! Share SharingCircle with friends by forwarding the next message 👇")
         await send_whatsapp_message(phone,
             "Hey! I've been using SharingCircle to share links and ideas with my closest friends. "
             "It's like a private feed for your inner circle — music, articles, ideas worth sharing. "
             "Message this number to join: wa.me/16472039443")
 
-        # Immediately: prompt to try it
-        await send_whatsapp_message(phone,
-            "Try it now — send me any link you've found interesting lately!")
-
         now = datetime.now(timezone.utc)
 
-        # 6 hours later: remind to add friends
+        # 2 hours later: prompt to share a link
         schedule_message(
             phone,
-            f"👥 Don't forget to add friends to your circle! Send me a contact card (tap 📎 → Contact) or visit {setup_url}",
-            now + timedelta(hours=6)
-        )
-
-        # Day 2: nudge to share
-        schedule_message(
-            phone,
-            "💡 Anything you find interesting — articles, music, ideas — just send it here and it goes straight to your circle!",
-            now + timedelta(days=2),
-        )
-
-        # Day 4: nudge to add friends
-        schedule_message(
-            phone,
-            f"Your circle is waiting! Add friends so they can see what you share: {setup_url}",
-            now + timedelta(days=4),
+            "Once you've added some friends, send me any link you've been enjoying lately and I'll share it with your circle! 🔗",
+            now + timedelta(hours=2)
         )
 
         return True
