@@ -279,10 +279,21 @@ async def handle_onboarding(user, phone, message):
                 await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
                 return
             contact_phone = normalize_phone(phones[0].get("phone", ""))
-            supabase.table("users").update({
-                "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
-            }).eq("phone_number", phone).execute()
-            await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
+            existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
+            if existing.data and existing.data[0].get("email"):
+                supabase.table("circle").insert({
+                    "sender_phone": phone,
+                    "recipient_name": name,
+                    "recipient_phone": contact_phone,
+                    "recipient_email": existing.data[0]["email"]
+                }).execute()
+                supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
+                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your circle, or type *done* to continue.")
+            else:
+                supabase.table("users").update({
+                    "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
+                }).eq("phone_number", phone).execute()
+                await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
         elif text.lower() == "skip":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
@@ -321,10 +332,20 @@ async def handle_onboarding(user, phone, message):
                 await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
                 return
             contact_phone = normalize_phone(phones[0].get("phone", ""))
-            supabase.table("users").update({
-                "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
-            }).eq("phone_number", phone).execute()
-            await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
+            existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
+            if existing.data and existing.data[0].get("email"):
+                supabase.table("circle").insert({
+                    "sender_phone": phone,
+                    "recipient_name": name,
+                    "recipient_phone": contact_phone,
+                    "recipient_email": existing.data[0]["email"]
+                }).execute()
+                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your circle, or type *done* to continue.")
+            else:
+                supabase.table("users").update({
+                    "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
+                }).eq("phone_number", phone).execute()
+                await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
         elif text.lower() == "done":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
@@ -693,7 +714,7 @@ async def process_message(phone, message, message_id):
             }).execute()
             await send_whatsapp_message(phone,
                 "👋 Welcome to SharingCircle!\n\n"
-                "Share your favorite things with your favorite people — articles, music, podcasts, ideas.\n\n"
+                "Share your favorite finds with your favorite people — articles, music, podcasts, ideas.\n\n"
                 "How it works:\n"
                 "• Add friends you want to share with\n"
                 "• Send links here anytime\n"
