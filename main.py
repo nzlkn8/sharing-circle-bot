@@ -26,7 +26,6 @@ BASE_URL = "https://sharing-circle-web.vercel.app"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 processed_messages = set()
-pending_contacts = {}
 
 # --- Helpers ---
 
@@ -239,45 +238,157 @@ def schedule_message(phone, message, send_at):
         "sent": False,
     }).execute()
 
-async def handle_new_user(phone):
-    await send_whatsapp_message(phone,
-        "👋 Welcome to SharingCircle!\n\n"
-        "Share your favorite things with your favorite people — articles, music, podcasts, ideas.\n\n"
-        "How it works:\n"
-        "- Add friends you want to share with\n"
-        "- Send links here anytime\n"
-        "- Friends see your shares in their feed + a weekly digest every Sunday\n\n"
-        "What's your first name?")
-    supabase.table("users").insert({
-        "phone_number": phone,
-        "name": "__awaiting_name__"
-    }).execute()
+async def handle_onboarding(user, phone, message):
+    step = user.get("onboarding_step", "awaiting_name")
+    msg_type = message.get("type")
+    text = message.get("text", {}).get("body", "").strip() if msg_type == "text" else ""
 
-async def handle_onboarding(user, phone, text):
-    if user["name"] == "__awaiting_name__":
+    if step == "awaiting_name":
+        if not text:
+            return
         slug = generate_slug(text)
         supabase.table("users").update({
             "name": text,
-            "feed_slug": slug
+            "feed_slug": slug,
+            "onboarding_step": "awaiting_email"
         }).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone,
             f"Nice to meet you, {text}! 👋\n\nWhat's your email address? (We'll send you a weekly digest every Sunday)")
-        return True
+        return
 
-    if not user.get("email"):
-        slug = user.get("feed_slug") or generate_slug(user["name"])
+    if step == "awaiting_email":
+        if not text:
+            return
         supabase.table("users").update({
             "email": text,
-            "feed_slug": slug,
-            "onboarding_step": "awaiting_first_link"
+            "onboarding_step": "awaiting_circle_contact"
         }).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone,
+            "Let's add the first person to your circle! Tap + → Contact to share their contact card. Type *skip* to do this later.")
+        return
+
+    if step == "awaiting_circle_contact":
+        if msg_type == "contacts":
+            contacts = message.get("contacts", [])
+            if not contacts:
+                return
+            contact = contacts[0]
+            name = contact.get("name", {}).get("formatted_name", "Unknown")
+            phones = contact.get("phones", [])
+            if not phones:
+                await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
+                return
+            contact_phone = normalize_phone(phones[0].get("phone", ""))
+            supabase.table("users").update({
+                "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
+            }).eq("phone_number", phone).execute()
+            await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
+        elif text.lower() == "skip":
+            supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
+            await send_whatsapp_message(phone,
+                "No problem! Now share a link — a song, podcast or article you've been enjoying lately 🔗")
+        else:
+            await send_whatsapp_message(phone,
+                "Please share a contact card (tap + → Contact) or type *skip* to continue.")
+        return
+
+    if step.startswith("awaiting_contact_email:"):
+        if not text:
+            return
+        parts = step.split(":", 2)
+        contact_name = parts[1] if len(parts) > 1 else "Unknown"
+        contact_phone = parts[2] if len(parts) > 2 else ""
+        supabase.table("circle").insert({
+            "sender_phone": phone,
+            "recipient_name": contact_name,
+            "recipient_phone": contact_phone,
+            "recipient_email": text.strip()
+        }).execute()
+        supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone,
+            f"✅ {contact_name} added! Send another contact to keep building your circle, or type *done* to continue.")
+        return
+
+    if step == "awaiting_more_contacts":
+        if msg_type == "contacts":
+            contacts = message.get("contacts", [])
+            if not contacts:
+                return
+            contact = contacts[0]
+            name = contact.get("name", {}).get("formatted_name", "Unknown")
+            phones = contact.get("phones", [])
+            if not phones:
+                await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
+                return
+            contact_phone = normalize_phone(phones[0].get("phone", ""))
+            supabase.table("users").update({
+                "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
+            }).eq("phone_number", phone).execute()
+            await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
+        elif text.lower() == "done":
+            supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
+            await send_whatsapp_message(phone,
+                "Now share a link — a song, podcast or article you've been enjoying lately 🔗")
+        else:
+            await send_whatsapp_message(phone,
+                "Please share a contact card (tap + → Contact) or type *done* to continue.")
+        return
+
+    if step == "awaiting_first_link":
+        content_text = text if text else ""
+        if not content_text and msg_type != "text":
+            return
+        slug = user["feed_slug"]
+        feed_url = f"{BASE_URL}/u/{slug}"
+        setup_url = f"{BASE_URL}/setup/{slug}"
+
+        url = extract_url(content_text)
+        is_link = url is not None
+        content = url if is_link else content_text
+        post_type = "link" if is_link else "thought"
+        category = "other" if is_link else "thought"
+
+        result = supabase.table("posts").insert({
+            "phone_number": phone,
+            "type": post_type,
+            "content": content,
+            "category": category,
+            "summary": "",
+            "title": None,
+            "thumbnail": None,
+            "source_type": post_type
+        }).execute()
+        post_id = result.data[0]["id"] if result.data else None
+
+        supabase.table("users").update({"onboarding_step": "complete"}).eq("phone_number", phone).execute()
 
         await send_whatsapp_message(phone,
-            "Great! Now share a link — a song, podcast, or article you've been enjoying lately. This will be your first share! 🔗")
+            f"🎉 Perfect! Your circle will see this in their feed and weekly digest.\n\n"
+            f"📱 Your feed: {feed_url}\n"
+            f"👥 Manage your circle: {setup_url}")
 
-        return True
+        await send_whatsapp_message(phone,
+            "Quick commands:\n"
+            "*help* — all commands\n"
+            "*my circle* — see who's in your circle\n"
+            "*my links* — your recent shares\n"
+            "*my feed* — get your feed link")
 
-    return False
+        if post_id:
+            async def enrich_first_post():
+                try:
+                    cat, summary, title, thumbnail, source_type = await ai_process(content, is_url=is_link)
+                    supabase.table("posts").update({
+                        "category": cat,
+                        "summary": summary,
+                        "title": title,
+                        "thumbnail": thumbnail,
+                        "source_type": source_type
+                    }).eq("id", post_id).execute()
+                except:
+                    pass
+            asyncio.create_task(enrich_first_post())
+        return
 
 async def handle_command(phone, text, user):
     cmd = text.lower().strip()
@@ -399,34 +510,6 @@ async def handle_post(phone, text, user):
                 pass
         asyncio.create_task(enrich_post())
 
-async def handle_contact_card(phone, contacts):
-    contact = contacts[0]
-    name = contact.get("name", {}).get("formatted_name", "Unknown")
-    phones = contact.get("phones", [])
-    if not phones:
-        await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number.")
-        return
-
-    contact_phone = normalize_phone(phones[0].get("phone", ""))
-
-    # Query Supabase fresh — never use cached data
-    existing = supabase.table("circle").select("id").eq("sender_phone", phone).eq("recipient_phone", contact_phone).execute()
-    if existing.data:
-        await send_whatsapp_message(phone, f"👤 {name} is already in your circle!")
-        return
-
-    pending_contacts[phone] = {"name": name, "phone": contact_phone}
-    await send_whatsapp_message(phone, f"Got {name}! What's their email address?")
-
-async def process_contact_card(phone, contacts, message_id):
-    try:
-        user = get_user(phone)
-        if not user or user["name"] == "__awaiting_name__" or not user.get("email"):
-            await send_whatsapp_message(phone, "Please finish setting up your account first!")
-            return
-        await handle_contact_card(phone, contacts)
-    except Exception as e:
-        print(f"Error processing contact card {message_id}: {e}")
 
 # --- Digest ---
 
@@ -597,91 +680,36 @@ async def verify(request: Request):
         return PlainTextResponse(content=challenge, status_code=200)
     return PlainTextResponse(content="Verification failed", status_code=403)
 
-async def process_message(phone, text, message_id):
+async def process_message(phone, message, message_id):
     try:
         user = get_user(phone)
 
         if not user:
-            await handle_new_user(phone)
-            return
-
-        if user["name"] is None or user["name"] == "__awaiting_name__" or not user.get("email"):
-            await handle_onboarding(user, phone, text)
-            return
-
-        if user.get("onboarding_step") == "awaiting_first_link":
-            name = user["name"]
-            slug = user["feed_slug"]
-            feed_url = f"{BASE_URL}/u/{slug}"
-            setup_url = f"{BASE_URL}/setup/{slug}"
-
-            url = extract_url(text)
-            is_link = url is not None
-            content = url if is_link else text
-            post_type = "link" if is_link else "thought"
-            category = "other" if is_link else "thought"
-
-            result = supabase.table("posts").insert({
+            slug = generate_slug(phone[-6:])
+            supabase.table("users").insert({
                 "phone_number": phone,
-                "type": post_type,
-                "content": content,
-                "category": category,
-                "summary": "",
-                "title": None,
-                "thumbnail": None,
-                "source_type": post_type
+                "feed_slug": slug,
+                "onboarding_step": "awaiting_name"
             }).execute()
-            post_id = result.data[0]["id"] if result.data else None
-
-            supabase.table("users").update({"onboarding_step": "complete"}).eq("phone_number", phone).execute()
-
             await send_whatsapp_message(phone,
-                f"🎉 You're all set, {name}! Here's your personal feed:\n"
-                f"{feed_url}\n\n"
-                f"👥 Now let's add some friends to your circle so they can see what you share:\n"
-                f"- Tap + → Contact in this chat to share a contact card\n"
-                f"- Or manage your circle on the web: {setup_url}")
-
-            await send_whatsapp_message(phone,
-                "Quick commands:\n"
-                "*help* — see all commands\n"
-                "*my circle* — see who's in your circle\n"
-                "*my links* — see your recent shares\n"
-                "*my feed* — get your feed link")
-
-            if is_link and post_id:
-                async def enrich_first_post():
-                    try:
-                        cat, summary, title, thumbnail, source_type = await ai_process(content, is_url=True)
-                        supabase.table("posts").update({
-                            "category": cat,
-                            "summary": summary,
-                            "title": title,
-                            "thumbnail": thumbnail,
-                            "source_type": source_type
-                        }).eq("id", post_id).execute()
-                    except:
-                        pass
-                asyncio.create_task(enrich_first_post())
-
+                "👋 Welcome to SharingCircle!\n\n"
+                "Share your favorite things with your favorite people — articles, music, podcasts, ideas.\n\n"
+                "How it works:\n"
+                "• Add friends you want to share with\n"
+                "• Send links here anytime\n"
+                "• Friends see your shares in their feed + a weekly digest every Sunday\n\n"
+                "What's your first name?")
             return
 
-        if phone in pending_contacts and is_valid_email(text):
-            pending = pending_contacts.pop(phone)
-            supabase.table("circle").insert({
-                "sender_phone": phone,
-                "recipient_name": pending["name"],
-                "recipient_phone": pending["phone"],
-                "recipient_email": text.strip()
-            }).execute()
-            await send_whatsapp_message(phone, f"✅ {pending['name']} added to your circle!")
+        step = user.get("onboarding_step", "complete")
+        if step != "complete":
+            await handle_onboarding(user, phone, message)
+            return
 
-            # Notify the recipient
-            await send_whatsapp_message(
-                pending["phone"],
-                f"👋 Hey! {user['name']} added you to their SharingCircle — a private feed where they share links, music and ideas with their closest friends.\n\n"
-                f"Message this number to set up your own circle and see what they're sharing: wa.me/16472039443"
-            )
+        msg_type = message.get("type")
+        text = message.get("text", {}).get("body", "").strip() if msg_type == "text" else ""
+
+        if not text:
             return
 
         handled = await handle_command(phone, text, user)
@@ -716,18 +744,13 @@ async def handle_message(request: Request, background_tasks: BackgroundTasks):
         phone = message["from"]
         msg_type = message.get("type")
 
-        if msg_type == "contacts":
-            contacts = message.get("contacts", [])
-            if contacts:
-                background_tasks.add_task(process_contact_card, phone, contacts, message_id)
+        if msg_type not in ("text", "contacts"):
             return {"status": "ok"}
 
-        text = message.get("text", {}).get("body", "").strip()
-
-        if not text:
+        if msg_type == "text" and not message.get("text", {}).get("body", "").strip():
             return {"status": "ok"}
 
-        background_tasks.add_task(process_message, phone, text, message_id)
+        background_tasks.add_task(process_message, phone, message, message_id)
 
     except Exception as e:
         print(f"Error: {e}")
