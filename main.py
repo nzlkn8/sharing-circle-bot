@@ -264,7 +264,7 @@ async def handle_onboarding(user, phone, message):
             "onboarding_step": "awaiting_circle_contact"
         }).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone,
-            "Let's add the first person to your circle! Tap + → Contact to share their contact card. Type *skip* to do this later.")
+            "Let's add the first person to your FaveFinds! Tap + → Contact to share their contact card. Type *skip* to do this later.")
         return
 
     if step == "awaiting_circle_contact":
@@ -288,7 +288,7 @@ async def handle_onboarding(user, phone, message):
                     "recipient_email": existing.data[0]["email"]
                 }).execute()
                 supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
-                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your circle, or type *done* to continue.")
+                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
             else:
                 supabase.table("users").update({
                     "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
@@ -317,7 +317,7 @@ async def handle_onboarding(user, phone, message):
         }).execute()
         supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone,
-            f"✅ {contact_name} added! Send another contact to keep building your circle, or type *done* to continue.")
+            f"✅ {contact_name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
         return
 
     if step == "awaiting_more_contacts":
@@ -340,7 +340,7 @@ async def handle_onboarding(user, phone, message):
                     "recipient_phone": contact_phone,
                     "recipient_email": existing.data[0]["email"]
                 }).execute()
-                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your circle, or type *done* to continue.")
+                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
             else:
                 supabase.table("users").update({
                     "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
@@ -384,14 +384,14 @@ async def handle_onboarding(user, phone, message):
         supabase.table("users").update({"onboarding_step": "complete"}).eq("phone_number", phone).execute()
 
         await send_whatsapp_message(phone,
-            f"🎉 Perfect! Your circle will see this in their feed and weekly digest.\n\n"
+            f"🎉 Perfect! Your people will see this in their feed and weekly digest.\n\n"
             f"📱 Your feed: {feed_url}\n"
-            f"👥 Manage your circle: {setup_url}")
+            f"👥 Manage your people: {setup_url}")
 
         await send_whatsapp_message(phone,
             "Quick commands:\n"
             "*help* — all commands\n"
-            "*my circle* — see who's in your circle\n"
+            "*my people* — see who's in your FaveFinds\n"
             "*my links* — your recent shares\n"
             "*my feed* — get your feed link")
 
@@ -418,11 +418,11 @@ async def handle_command(phone, text, user):
         await send_whatsapp_message(phone,
             "📖 *FaveFinds Commands*\n\n"
             "*my feed* — get your feed URL\n"
-            "*my circle* — see who's in your circle\n"
+            "*my people* — see who's in your FaveFinds\n"
             "*my links* — see your recent shares\n"
             "*delete last* — remove your last post\n"
-            "*pause* — stop sending to your circle\n"
-            "*resume* — resume sending to your circle\n"
+            "*pause* — stop sending to your people\n"
+            "*resume* — resume sending to your people\n"
             "*help* — show this message")
         return True
 
@@ -433,15 +433,15 @@ async def handle_command(phone, text, user):
             f"⚠️ Keep this link private — it's public to anyone who has it.")
         return True
 
-    if cmd == "my circle":
+    if cmd in ("my circle", "my people"):
         circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
         if not circle.data:
             await send_whatsapp_message(phone,
-                f"Your circle is empty! Add friends at:\n{BASE_URL}/setup/{user['feed_slug']}")
+                f"You haven't added anyone yet! Add friends at:\n{BASE_URL}/setup/{user['feed_slug']}")
         else:
             names = [f"• {r['recipient_name']}" for r in circle.data]
             await send_whatsapp_message(phone,
-                f"👥 *Your Circle* ({len(circle.data)} people)\n\n" + "\n".join(names))
+                f"👥 *Your People* ({len(circle.data)} people)\n\n" + "\n".join(names))
         return True
 
     if cmd == "my links":
@@ -470,7 +470,7 @@ async def handle_command(phone, text, user):
 
     if cmd == "pause":
         supabase.table("users").update({"is_paused": True}).eq("phone_number", phone).execute()
-        await send_whatsapp_message(phone, "⏸ Sharing paused. Your circle won't receive new posts until you resume.")
+        await send_whatsapp_message(phone, "⏸ Sharing paused. Your people won't receive new posts until you resume.")
         return True
 
     if cmd == "resume":
@@ -510,10 +510,10 @@ async def handle_post(phone, text, user):
 
     if is_link:
         await send_whatsapp_message(phone,
-            f"🔗 Saved! Sent to {circle_count} people in your circle.")
+            f"🔗 Saved! Sent to {circle_count} people.")
     else:
         await send_whatsapp_message(phone,
-            f"💭 Saved! Sent to {circle_count} people in your circle.")
+            f"💭 Saved! Sent to {circle_count} people.")
 
     # Run AI processing in background so feed gets enriched data
     if is_link and post_id:
@@ -612,10 +612,10 @@ async def send_digest(phone_number, period):
         <div style="background:#faf8f5;padding:40px 20px;font-family:Georgia,serif;">
             <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;padding:36px;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
                 <h1 style="color:#2c2c2c;font-size:26px;margin:0 0 4px 0;">FaveFinds</h1>
-                <p style="color:#888;font-size:15px;margin:0 0 28px 0;">Here's what your circle shared {period_label}</p>
+                <p style="color:#888;font-size:15px;margin:0 0 28px 0;">Here's what your people shared {period_label}</p>
                 {sender_sections}
                 <hr style="border:none;border-top:1px solid #e8ddd6;margin:28px 0 16px 0;" />
-                <p style="color:#aaa;font-size:12px;margin:0;">You're receiving this because someone added you to their FaveFinds circle.</p>
+                <p style="color:#aaa;font-size:12px;margin:0;">You're receiving this because someone added you to their FaveFinds.</p>
             </div>
         </div>'''
 
