@@ -381,7 +381,18 @@ async def handle_onboarding(user, phone, message):
         }).execute()
         post_id = result.data[0]["id"] if result.data else None
 
+        user_email = supabase.table("users").select("email").eq("phone_number", phone).execute()
+        user_email = user_email.data[0]["email"] if user_email.data else None
+
         supabase.table("users").update({"onboarding_step": "complete"}).eq("phone_number", phone).execute()
+
+        if user_email:
+            async def update_circle_email():
+                try:
+                    supabase.table("circle").update({"recipient_email": user_email}).eq("recipient_phone", phone).execute()
+                except Exception as e:
+                    print(f"[Onboarding] Failed to update circle email for {phone}: {e}")
+            asyncio.create_task(update_circle_email())
 
         await send_whatsapp_message(phone,
             f"🎉 Perfect! Your people will see this in their feed and weekly digest.\n\n"
@@ -714,11 +725,11 @@ async def process_message(phone, message, message_id):
             }).execute()
             await send_whatsapp_message(phone,
                 "👋 Welcome to FaveFinds!\n\n"
-                "Share your favorite finds with your favorite people — articles, music, podcasts, ideas.\n\n"
-                "How it works:\n"
-                "• Add friends you want to share with\n"
-                "• Send links here anytime\n"
-                "• Friends see your shares in their feed + a weekly digest every Sunday\n\n"
+                "You find great things every day — a song, an article, a podcast worth hearing. But sharing them means figuring out who to send what, across different chats and apps.\n\n"
+                "FaveFinds makes it simple:\n"
+                "- Add the people you want to share with\n"
+                "- Send links here anytime — no thinking required\n"
+                "- Your people get a personal newsletter every Sunday with everything you've shared\n\n"
                 "What's your first name?")
             return
 
