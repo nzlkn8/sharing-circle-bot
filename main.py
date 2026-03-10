@@ -21,7 +21,7 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 PHONE_NUMBER_ID = "918546528019408"
-BASE_URL = "https://sharing-circle-web.vercel.app"
+BASE_URL = "https://favefinds.app"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -416,7 +416,7 @@ async def handle_command(phone, text, user):
 
     if cmd == "help":
         await send_whatsapp_message(phone,
-            "📖 *SharingCircle Commands*\n\n"
+            "📖 *FaveFinds Commands*\n\n"
             "*my feed* — get your feed URL\n"
             "*my circle* — see who's in your circle\n"
             "*my links* — see your recent shares\n"
@@ -573,7 +573,7 @@ async def send_digest(phone_number, period):
             by_sender.setdefault(sp, []).append(post)
 
         period_label = "this week" if period == "weekly" else "today"
-        subject = f"Your SharingCircle weekly digest 🔗" if period == "weekly" else "Your SharingCircle daily digest 🔗"
+        subject = f"Your FaveFinds weekly digest 🔗" if period == "weekly" else "Your FaveFinds daily digest 🔗"
 
         sender_sections = ""
         for sp, sender_posts in by_sender.items():
@@ -611,11 +611,11 @@ async def send_digest(phone_number, period):
         html_body = f'''
         <div style="background:#faf8f5;padding:40px 20px;font-family:Georgia,serif;">
             <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;padding:36px;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
-                <h1 style="color:#2c2c2c;font-size:26px;margin:0 0 4px 0;">SharingCircle</h1>
+                <h1 style="color:#2c2c2c;font-size:26px;margin:0 0 4px 0;">FaveFinds</h1>
                 <p style="color:#888;font-size:15px;margin:0 0 28px 0;">Here's what your circle shared {period_label}</p>
                 {sender_sections}
                 <hr style="border:none;border-top:1px solid #e8ddd6;margin:28px 0 16px 0;" />
-                <p style="color:#aaa;font-size:12px;margin:0;">You're receiving this because someone added you to their SharingCircle.</p>
+                <p style="color:#aaa;font-size:12px;margin:0;">You're receiving this because someone added you to their FaveFinds circle.</p>
             </div>
         </div>'''
 
@@ -627,7 +627,7 @@ async def send_digest(phone_number, period):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "from": "SharingCircle <onboarding@resend.dev>",
+                    "from": "FaveFinds <digest@favefinds.app>",
                     "to": [email],
                     "subject": subject,
                     "html": html_body
@@ -676,7 +676,7 @@ async def shutdown_event():
 
 @app.get("/")
 async def home():
-    return {"status": "SharingCircle Brain is Online"}
+    return {"status": "FaveFinds Brain is Online"}
 
 @app.get("/trigger-digest/{phone_number}")
 async def trigger_digest(phone_number: str):
@@ -713,7 +713,7 @@ async def process_message(phone, message, message_id):
                 "onboarding_step": "awaiting_name"
             }).execute()
             await send_whatsapp_message(phone,
-                "👋 Welcome to SharingCircle!\n\n"
+                "👋 Welcome to FaveFinds!\n\n"
                 "Share your favorite finds with your favorite people — articles, music, podcasts, ideas.\n\n"
                 "How it works:\n"
                 "• Add friends you want to share with\n"
