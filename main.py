@@ -25,6 +25,8 @@ BASE_URL = "https://favefinds.app"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+NOTIFY_ON_ADD = False
+
 processed_messages = set()
 
 # --- Helpers ---
@@ -238,6 +240,53 @@ def schedule_message(phone, message, send_at):
         "sent": False,
     }).execute()
 
+async def add_contact_to_circle(sender_phone, sender_name, contact_name, contact_phone):
+    """Add a contact to sender's circle. Returns (success, warning_msg)."""
+    # Check circle count
+    circle_count_result = supabase.table("circle").select("id").eq("sender_phone", sender_phone).execute()
+    circle_count = len(circle_count_result.data) if circle_count_result.data else 0
+
+    if circle_count >= 50:
+        await send_whatsapp_message(sender_phone,
+            "You've reached the 50 person limit. Remove someone to add a new person.")
+        return False, None
+
+    # Auto-lookup email if contact is an existing user
+    existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
+    contact_email = None
+    if existing.data and existing.data[0].get("email"):
+        contact_email = existing.data[0]["email"]
+
+    supabase.table("circle").insert({
+        "sender_phone": sender_phone,
+        "recipient_name": contact_name,
+        "recipient_phone": contact_phone,
+        "recipient_email": contact_email
+    }).execute()
+
+    new_count = circle_count + 1
+
+    # Capacity warning at 40-49
+    warning_msg = None
+    if 40 <= new_count <= 49:
+        spots_remaining = 50 - new_count
+        warning_msg = f"👥 Heads up — you've added {new_count} people, {spots_remaining} spots remaining in your FaveFinds."
+
+    # Notify recipient if enabled
+    if NOTIFY_ON_ADD:
+        recipient_user = supabase.table("users").select("phone_number").eq("phone_number", contact_phone).execute()
+        if recipient_user.data:
+            await send_whatsapp_message(contact_phone,
+                f"Hey! {sender_name} ({sender_phone}) added you to their FaveFinds. "
+                f"You'll start seeing their shares in your feed and next Sunday digest 🎉")
+        else:
+            await send_whatsapp_message(contact_phone,
+                f"Hey! {sender_name} ({sender_phone}) added you to their FaveFinds. "
+                f"Type *JOIN* to sign up and see your friends' favorite finds — music, articles, podcasts. "
+                f"Takes less than 2 minutes! 🎉")
+
+    return True, warning_msg
+
 async def handle_onboarding(user, phone, message):
     step = user.get("onboarding_step", "awaiting_name")
     msg_type = message.get("type")
@@ -264,7 +313,8 @@ async def handle_onboarding(user, phone, message):
             "onboarding_step": "awaiting_circle_contact"
         }).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone,
-            "Let's add the first person to your FaveFinds! Tap + → Contact to share their contact card. Type *skip* to do this later.")
+            "Let's add the first person to your FaveFinds! Tap + → Contact to share their contact card, or type *skip* to do this later.\n\n"
+            "Note: we'll send your friend a message letting them know you've added them.")
         return
 
     if step == "awaiting_circle_contact":
@@ -279,21 +329,14 @@ async def handle_onboarding(user, phone, message):
                 await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
                 return
             contact_phone = normalize_phone(phones[0].get("phone", ""))
-            existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
-            if existing.data and existing.data[0].get("email"):
-                supabase.table("circle").insert({
-                    "sender_phone": phone,
-                    "recipient_name": name,
-                    "recipient_phone": contact_phone,
-                    "recipient_email": existing.data[0]["email"]
-                }).execute()
+            sender_name = user.get("name", phone)
+            success, warning_msg = await add_contact_to_circle(phone, sender_name, name, contact_phone)
+            if success:
                 supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
-                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
-            else:
-                supabase.table("users").update({
-                    "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
-                }).eq("phone_number", phone).execute()
-                await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
+                await send_whatsapp_message(phone,
+                    f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
+                if warning_msg:
+                    await send_whatsapp_message(phone, warning_msg)
         elif text.lower() == "skip":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
@@ -301,23 +344,6 @@ async def handle_onboarding(user, phone, message):
         else:
             await send_whatsapp_message(phone,
                 "Please share a contact card (tap + → Contact) or type *skip* to continue.")
-        return
-
-    if step.startswith("awaiting_contact_email:"):
-        if not text:
-            return
-        parts = step.split(":", 2)
-        contact_name = parts[1] if len(parts) > 1 else "Unknown"
-        contact_phone = parts[2] if len(parts) > 2 else ""
-        supabase.table("circle").insert({
-            "sender_phone": phone,
-            "recipient_name": contact_name,
-            "recipient_phone": contact_phone,
-            "recipient_email": text.strip()
-        }).execute()
-        supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
-        await send_whatsapp_message(phone,
-            f"✅ {contact_name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
         return
 
     if step == "awaiting_more_contacts":
@@ -332,20 +358,13 @@ async def handle_onboarding(user, phone, message):
                 await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
                 return
             contact_phone = normalize_phone(phones[0].get("phone", ""))
-            existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
-            if existing.data and existing.data[0].get("email"):
-                supabase.table("circle").insert({
-                    "sender_phone": phone,
-                    "recipient_name": name,
-                    "recipient_phone": contact_phone,
-                    "recipient_email": existing.data[0]["email"]
-                }).execute()
-                await send_whatsapp_message(phone, f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
-            else:
-                supabase.table("users").update({
-                    "onboarding_step": f"awaiting_contact_email:{name}:{contact_phone}"
-                }).eq("phone_number", phone).execute()
-                await send_whatsapp_message(phone, f"Got {name}! What's their email so they receive the weekly digest?")
+            sender_name = user.get("name", phone)
+            success, warning_msg = await add_contact_to_circle(phone, sender_name, name, contact_phone)
+            if success:
+                await send_whatsapp_message(phone,
+                    f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
+                if warning_msg:
+                    await send_whatsapp_message(phone, warning_msg)
         elif text.lower() == "done":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
@@ -368,6 +387,7 @@ async def handle_onboarding(user, phone, message):
         content = url if is_link else content_text
         post_type = "link" if is_link else "thought"
         category = "other" if is_link else "thought"
+        caption = content_text.replace(url, "").strip() if is_link else None
 
         result = supabase.table("posts").insert({
             "phone_number": phone,
@@ -377,7 +397,8 @@ async def handle_onboarding(user, phone, message):
             "summary": "",
             "title": None,
             "thumbnail": None,
-            "source_type": post_type
+            "source_type": post_type,
+            "caption": caption
         }).execute()
         post_id = result.data[0]["id"] if result.data else None
 
@@ -386,13 +407,14 @@ async def handle_onboarding(user, phone, message):
 
         supabase.table("users").update({"onboarding_step": "complete"}).eq("phone_number", phone).execute()
 
-        if user_email:
-            async def update_circle_email():
-                try:
+        # Retroactively fill in email across all circles this user has been added to
+        async def update_circle_email():
+            try:
+                if user_email:
                     supabase.table("circle").update({"recipient_email": user_email}).eq("recipient_phone", phone).execute()
-                except Exception as e:
-                    print(f"[Onboarding] Failed to update circle email for {phone}: {e}")
-            asyncio.create_task(update_circle_email())
+            except Exception as e:
+                print(f"[Onboarding] Failed to update circle email for {phone}: {e}")
+        asyncio.create_task(update_circle_email())
 
         await send_whatsapp_message(phone,
             f"🎉 Perfect! Your people will see this in their feed and weekly digest.\n\n"
@@ -498,20 +520,29 @@ async def handle_post(phone, text, user):
 
     url = extract_url(text)
     is_link = url is not None
-    content = url if is_link else text
-    post_type = "link" if is_link else "thought"
+
+    # Text-only messages: guide user to share a link instead
+    if not is_link:
+        await send_whatsapp_message(phone,
+            "FaveFinds is for sharing links — articles, music, podcasts. Got a link? Send it here! "
+            "You can add a few words of context alongside the link if you'd like 🔗")
+        return
+
+    content = url
+    # Extract caption: text surrounding the URL
+    caption = text.replace(url, "").strip() or None
 
     # Save post immediately with placeholder AI data
-    category = "other" if is_link else "thought"
     result = supabase.table("posts").insert({
         "phone_number": phone,
-        "type": post_type,
+        "type": "link",
         "content": content,
-        "category": category,
+        "category": "other",
         "summary": "",
         "title": None,
         "thumbnail": None,
-        "source_type": post_type
+        "source_type": "link",
+        "caption": caption
     }).execute()
     post_id = result.data[0]["id"] if result.data else None
 
@@ -519,15 +550,11 @@ async def handle_post(phone, text, user):
     circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
     circle_count = len(circle.data) if circle.data else 0
 
-    if is_link:
-        await send_whatsapp_message(phone,
-            f"🔗 Saved! Sent to {circle_count} people.")
-    else:
-        await send_whatsapp_message(phone,
-            f"💭 Saved! Sent to {circle_count} people.")
+    await send_whatsapp_message(phone,
+        f"🔗 Saved! Sent to {circle_count} people.")
 
     # Run AI processing in background so feed gets enriched data
-    if is_link and post_id:
+    if post_id:
         async def enrich_post():
             try:
                 category, summary, title, thumbnail, source_type = await ai_process(content, is_url=True)
@@ -605,11 +632,15 @@ async def send_digest(phone_number, period):
                             bullets_html += f'<li style="margin:2px 0;color:#555;font-size:14px;">{b}</li>'
                     if bullets_html:
                         bullets_html = f'<ul style="margin:6px 0 0 0;padding-left:18px;">{bullets_html}</ul>'
+                caption_html = ""
+                if p.get("caption"):
+                    caption_html = f'<p style="margin:4px 0 0 0;color:#666;font-size:13px;font-style:italic;">{p["caption"]}</p>'
                 items_html += f'''
                 <div style="display:flex;align-items:flex-start;margin-bottom:16px;">
                     {thumbnail_html}
                     <div>
                         <a href="{content_url}" style="font-weight:bold;color:#2c2c2c;text-decoration:none;font-size:15px;">{title}</a>
+                        {caption_html}
                         {bullets_html}
                     </div>
                 </div>'''
@@ -674,11 +705,34 @@ async def run_weekly_digest():
     for u in (users.data or []):
         await send_digest(u["phone_number"], "weekly")
 
+async def run_midweek_nudge():
+    """Every Wednesday at 15:00 UTC: nudge users who haven't shared since last Sunday."""
+    try:
+        users = supabase.table("users").select("phone_number").eq("onboarding_step", "complete").execute()
+        now = datetime.now(timezone.utc)
+        # weekday(): Mon=0 ... Sun=6; days since last Sunday = (weekday + 1) % 7
+        days_since_sunday = (now.weekday() + 1) % 7
+        last_sunday = (now - timedelta(days=days_since_sunday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        cutoff = last_sunday.isoformat()
+
+        for u in (users.data or []):
+            phone = u["phone_number"]
+            posts = supabase.table("posts").select("id").eq("phone_number", phone).gte("created_at", cutoff).limit(1).execute()
+            if not posts.data:
+                await send_whatsapp_message(phone,
+                    "👋 Midweek check-in — anything worth sharing with your people this week? "
+                    "A song, article, or podcast you've been enjoying? Just send it here 🔗")
+    except Exception as e:
+        print(f"[Midweek nudge] Error: {e}")
+
 @app.on_event("startup")
 async def startup_event():
     scheduler.add_job(check_scheduled_messages, 'interval', minutes=15)
     scheduler.add_job(run_daily_digest, 'cron', hour=23, minute=0)
     scheduler.add_job(run_weekly_digest, 'cron', day_of_week='sun', hour=15, minute=0)
+    scheduler.add_job(run_midweek_nudge, 'cron', day_of_week='wed', hour=15, minute=0)
     scheduler.start()
 
 @app.on_event("shutdown")
@@ -725,11 +779,10 @@ async def process_message(phone, message, message_id):
             }).execute()
             await send_whatsapp_message(phone,
                 "👋 Welcome to FaveFinds!\n\n"
-                "You find great things every day — a song, an article, a podcast worth hearing. But sharing them means figuring out who to send what, across different chats and apps.\n\n"
-                "FaveFinds makes it simple:\n"
-                "- Add the people you want to share with\n"
-                "- Send links here anytime — no thinking required\n"
-                "- Your people get a personal newsletter every Sunday with everything you've shared\n\n"
+                "Social media used to be about sharing your favorite things with your favorite people. Then it got weird.\n\n"
+                "FaveFinds is the good part back.\n\n"
+                "Share your favorite finds here — no more thinking about who to send what.\n\n"
+                "Users get a personalized feed and a weekly (or daily) email digest of their friends' finds — music, podcasts, articles. Simple.\n\n"
                 "What's your first name?")
             return
 
