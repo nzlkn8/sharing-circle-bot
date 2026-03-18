@@ -121,6 +121,31 @@ async def ai_process(content, is_url=True):
                     page_text = f"YouTube video: {title}"
                 except Exception:
                     pass
+            # Twitter/X — skip scraping, use OG metadata only
+            elif "x.com" in url or "twitter.com" in url:
+                source_type = "link"
+                try:
+                    r = await client.get(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    })
+                    title_match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
+                    if title_match:
+                        title = title_match.group(1).strip()
+                    og_desc_match = re.search(r'<meta[^>]+(?:property=["\']og:description["\']|name=["\']description["\'])[^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
+                    og_title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
+                    thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
+                    if og_title_match and not title:
+                        title = og_title_match.group(1).strip()
+                    if thumb_match:
+                        thumbnail = thumb_match.group(1).strip()
+                    if og_desc_match:
+                        page_text = f"Tweet/post: {og_desc_match.group(1).strip()}"
+                    elif title:
+                        page_text = f"Tweet/post: {title}"
+                    else:
+                        page_text = url
+                except Exception:
+                    page_text = url
             # Generic URL — fetch and extract text
             if not page_text:
                 try:
@@ -141,7 +166,21 @@ async def ai_process(content, is_url=True):
 
         is_youtube = "youtube.com" in url or "youtu.be" in url
         is_podcast = "open.spotify.com" in url and "/episode/" in url
-        if is_youtube:
+        is_twitter = "x.com" in url or "twitter.com" in url
+        if is_twitter:
+            prompt = f"""Analyze this tweet/post and provide:
+1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+2. Exactly 2-3 bullet points summarizing what this post is about
+
+Content: {page_text}
+
+Respond in this exact format:
+CATEGORY: [category]
+BULLETS:
+• [point 1]
+• [point 2]
+• [optional point 3]"""
+        elif is_youtube:
             prompt = f"""Analyze this YouTube video and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
 2. Exactly 1-2 bullet points about what this video is likely about, based on the title
