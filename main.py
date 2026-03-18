@@ -170,64 +170,67 @@ async def ai_process(content, is_url=True):
         if is_twitter:
             prompt = f"""Analyze this tweet/post and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 2-3 bullet points summarizing what this post is about
+2. Exactly 2-3 bullet points summarizing what this post is about. Put each bullet point on a new line.
 
 Content: {page_text}
 
 Respond in this exact format:
 CATEGORY: [category]
 BULLETS:
-• [point 1]
-• [point 2]
-• [optional point 3]"""
+- [point 1]
+- [point 2]
+- [optional point 3]"""
         elif is_youtube:
             prompt = f"""Analyze this YouTube video and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 1-2 bullet points about what this video is likely about, based on the title
+2. Exactly 1-2 bullet points about what this video is likely about, based on the title. Put each bullet point on a new line.
 
 Content: {page_text}
 
 Respond in this exact format:
 CATEGORY: [category]
 BULLETS:
-• [point 1]
-• [optional point 2]"""
+- [point 1]
+- [optional point 2]"""
         elif is_podcast:
             prompt = f"""Analyze this podcast episode and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 2-3 bullet points summarizing what this episode is about
+2. Exactly 2-3 bullet points summarizing what this episode is about. Put each bullet point on a new line.
 
 Content: {page_text}
 
 Respond in this exact format:
 CATEGORY: [category]
 BULLETS:
-• [point 1]
-• [point 2]
-• [optional point 3]"""
+- [point 1]
+- [point 2]
+- [optional point 3]"""
         else:
             prompt = f"""Analyze this web content and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 2-3 bullet points summarizing what this is about (each bullet on its own line starting with •)
+2. Exactly 2-3 bullet points summarizing what this is about. Put each bullet point on a new line.
 
 Content: {page_text}
 
 Respond in this exact format:
 CATEGORY: [category]
 BULLETS:
-• [point 1]
-• [point 2]
-• [optional point 3]"""
+- [point 1]
+- [point 2]
+- [optional point 3]"""
     else:
         prompt = f"""Analyze this thought/message and provide:
 1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. A 1-2 sentence restatement of the key point
+2. Exactly 2-3 bullet points summarizing the key points. Put each bullet point on a new line.
 
 Text: {content}
 
 Respond in this exact format:
 CATEGORY: [category]
-SUMMARY: [summary]"""
+BULLETS:
+- [point 1]
+- [point 2]
+- [optional point 3]"""
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -257,10 +260,8 @@ SUMMARY: [summary]"""
                 category = line.replace("CATEGORY:", "").strip().lower()
             elif line.startswith("BULLETS:"):
                 in_bullets = True
-            elif in_bullets and line.strip().startswith("•"):
+            elif in_bullets and line.strip().startswith("-"):
                 bullet_lines.append(line.strip())
-            elif line.startswith("SUMMARY:"):
-                summary = line.replace("SUMMARY:", "").strip()
 
         if bullet_lines:
             summary = "\n".join(bullet_lines)
@@ -666,7 +667,7 @@ async def send_digest(phone_number, period):
                 bullets_html = ""
                 if summary:
                     for bullet in summary.split("\n"):
-                        b = bullet.strip().lstrip("•").strip()
+                        b = bullet.strip().lstrip("-").lstrip("•").strip()
                         if b:
                             bullets_html += f'<li style="margin:2px 0;color:#555;font-size:14px;">{b}</li>'
                     if bullets_html:
