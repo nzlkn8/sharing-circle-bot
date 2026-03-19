@@ -377,8 +377,8 @@ async def handle_onboarding(user, phone, message):
             "onboarding_step": "awaiting_circle_contact"
         }).eq("phone_number", phone).execute()
         await send_whatsapp_message(phone,
-            "Let's add the first person to your FaveFinds! Tap + → Contact to share their contact card, or type *skip* to do this later.\n\n"
-            "Note: we'll send your friend a message letting them know you've added them.")
+            "Let's add some people to your FaveFinds! Tap + → Contact to share contact cards — you can select multiple at once.\n\n"
+            "You can always send contacts to this chat anytime to add more friends later.")
         return
 
     if step == "awaiting_circle_contact":
@@ -400,13 +400,10 @@ async def handle_onboarding(user, phone, message):
                 spots_remaining = 50 - circle_count
                 await send_whatsapp_message(phone,
                     f"👥 Heads up — you've added {circle_count} people, {spots_remaining} spots remaining in your FaveFinds.")
-        elif text.lower() == "skip":
+        else:
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
-                "No problem! Now share a link — a song, podcast or article you've been enjoying lately 🔗")
-        else:
-            await send_whatsapp_message(phone,
-                "Please share a contact card (tap + → Contact) or type *skip* to continue.")
+                "Now share a link — a song, podcast or article you've been enjoying lately 🔗")
         return
 
     if step == "awaiting_more_contacts":
