@@ -280,52 +280,76 @@ def schedule_message(phone, message, send_at):
         "sent": False,
     }).execute()
 
-async def add_contact_to_circle(sender_phone, sender_name, contact_name, contact_phone):
-    """Add a contact to sender's circle. Returns (success, warning_msg)."""
-    # Check circle count
-    circle_count_result = supabase.table("circle").select("id").eq("sender_phone", sender_phone).execute()
-    circle_count = len(circle_count_result.data) if circle_count_result.data else 0
+async def process_contacts_batch(sender_phone, sender_name, contacts):
+    """
+    Process all contacts in a list, adding new ones to the sender's circle.
+    Returns (added, skipped, at_limit, new_circle_count).
+    """
+    circle_result = supabase.table("circle").select("recipient_phone").eq("sender_phone", sender_phone).execute()
+    circle_phones = {r["recipient_phone"] for r in (circle_result.data or [])}
+    circle_count = len(circle_phones)
 
-    if circle_count >= 50:
-        await send_whatsapp_message(sender_phone,
-            "You've reached the 50 person limit. Remove someone to add a new person.")
-        return False, None
+    added = 0
+    skipped = 0
+    at_limit = False
 
-    # Auto-lookup email if contact is an existing user
-    existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
-    contact_email = None
-    if existing.data and existing.data[0].get("email"):
-        contact_email = existing.data[0]["email"]
+    for contact in contacts:
+        name = contact.get("name", {}).get("formatted_name", "Unknown")
+        phones = contact.get("phones", [])
+        if not phones:
+            continue
+        contact_phone = normalize_phone(phones[0].get("phone", ""))
+        if not contact_phone:
+            continue
 
-    supabase.table("circle").insert({
-        "sender_phone": sender_phone,
-        "recipient_name": contact_name,
-        "recipient_phone": contact_phone,
-        "recipient_email": contact_email
-    }).execute()
+        if contact_phone in circle_phones:
+            skipped += 1
+            continue
 
-    new_count = circle_count + 1
+        if circle_count >= 50:
+            at_limit = True
+            break
 
-    # Capacity warning at 40-49
-    warning_msg = None
-    if 40 <= new_count <= 49:
-        spots_remaining = 50 - new_count
-        warning_msg = f"👥 Heads up — you've added {new_count} people, {spots_remaining} spots remaining in your FaveFinds."
+        existing = supabase.table("users").select("email").eq("phone_number", contact_phone).execute()
+        contact_email = None
+        if existing.data and existing.data[0].get("email"):
+            contact_email = existing.data[0]["email"]
 
-    # Notify recipient if enabled
-    if NOTIFY_ON_ADD:
-        recipient_user = supabase.table("users").select("phone_number").eq("phone_number", contact_phone).execute()
-        if recipient_user.data:
-            await send_whatsapp_message(contact_phone,
-                f"Hey! {sender_name} ({sender_phone}) added you to their FaveFinds. "
-                f"You'll start seeing their shares in your feed and next Sunday digest 🎉")
-        else:
-            await send_whatsapp_message(contact_phone,
-                f"Hey! {sender_name} ({sender_phone}) added you to their FaveFinds. "
-                f"Type *JOIN* to sign up and see your friends' favorite finds — music, articles, podcasts. "
-                f"Takes less than 2 minutes! 🎉")
+        supabase.table("circle").insert({
+            "sender_phone": sender_phone,
+            "recipient_name": name,
+            "recipient_phone": contact_phone,
+            "recipient_email": contact_email
+        }).execute()
 
-    return True, warning_msg
+        circle_phones.add(contact_phone)
+        circle_count += 1
+        added += 1
+
+        if NOTIFY_ON_ADD:
+            recipient_user = supabase.table("users").select("phone_number").eq("phone_number", contact_phone).execute()
+            if recipient_user.data:
+                await send_whatsapp_message(contact_phone,
+                    f"Hey! {sender_name} ({sender_phone}) added you to their FaveFinds. "
+                    f"You'll start seeing their shares in your feed and next Sunday digest 🎉")
+            else:
+                await send_whatsapp_message(contact_phone,
+                    f"Hey! {sender_name} ({sender_phone}) added you to their FaveFinds. "
+                    f"Type *JOIN* to sign up and see your friends' favorite finds — music, articles, podcasts. "
+                    f"Takes less than 2 minutes! 🎉")
+
+    return added, skipped, at_limit, circle_count
+
+
+def build_contacts_summary(added, skipped, onboarding=True):
+    suffix = " Send more contacts or type *done* to continue." if onboarding else ""
+    if added == 0 and skipped > 0:
+        return f"ℹ️ {'Those contacts are' if skipped > 1 else 'That contact is'} already in your FaveFinds.{suffix}"
+    elif skipped > 0:
+        return (f"✅ Added {added} {'person' if added == 1 else 'people'} "
+                f"({skipped} already in your FaveFinds).{suffix}")
+    else:
+        return f"✅ Added {added} {'person' if added == 1 else 'people'} to your FaveFinds!{suffix}"
 
 async def handle_onboarding(user, phone, message):
     step = user.get("onboarding_step", "awaiting_name")
@@ -362,21 +386,20 @@ async def handle_onboarding(user, phone, message):
             contacts = message.get("contacts", [])
             if not contacts:
                 return
-            contact = contacts[0]
-            name = contact.get("name", {}).get("formatted_name", "Unknown")
-            phones = contact.get("phones", [])
-            if not phones:
-                await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
-                return
-            contact_phone = normalize_phone(phones[0].get("phone", ""))
             sender_name = user.get("name", phone)
-            success, warning_msg = await add_contact_to_circle(phone, sender_name, name, contact_phone)
-            if success:
-                supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
+            added, skipped, at_limit, circle_count = await process_contacts_batch(phone, sender_name, contacts)
+            if at_limit:
                 await send_whatsapp_message(phone,
-                    f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
-                if warning_msg:
-                    await send_whatsapp_message(phone, warning_msg)
+                    "You've reached the 50 person limit. Remove someone to add a new person.")
+                return
+            if added > 0:
+                supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
+            summary = build_contacts_summary(added, skipped, onboarding=True)
+            await send_whatsapp_message(phone, summary)
+            if 40 <= circle_count <= 49:
+                spots_remaining = 50 - circle_count
+                await send_whatsapp_message(phone,
+                    f"👥 Heads up — you've added {circle_count} people, {spots_remaining} spots remaining in your FaveFinds.")
         elif text.lower() == "skip":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
@@ -391,20 +414,18 @@ async def handle_onboarding(user, phone, message):
             contacts = message.get("contacts", [])
             if not contacts:
                 return
-            contact = contacts[0]
-            name = contact.get("name", {}).get("formatted_name", "Unknown")
-            phones = contact.get("phones", [])
-            if not phones:
-                await send_whatsapp_message(phone, "⚠️ That contact doesn't have a phone number. Try another.")
-                return
-            contact_phone = normalize_phone(phones[0].get("phone", ""))
             sender_name = user.get("name", phone)
-            success, warning_msg = await add_contact_to_circle(phone, sender_name, name, contact_phone)
-            if success:
+            added, skipped, at_limit, circle_count = await process_contacts_batch(phone, sender_name, contacts)
+            if at_limit:
                 await send_whatsapp_message(phone,
-                    f"✅ {name} added! Send another contact to keep building your FaveFinds, or type *done* to continue.")
-                if warning_msg:
-                    await send_whatsapp_message(phone, warning_msg)
+                    "You've reached the 50 person limit. Remove someone to add a new person.")
+                return
+            summary = build_contacts_summary(added, skipped, onboarding=True)
+            await send_whatsapp_message(phone, summary)
+            if 40 <= circle_count <= 49:
+                spots_remaining = 50 - circle_count
+                await send_whatsapp_message(phone,
+                    f"👥 Heads up — you've added {circle_count} people, {spots_remaining} spots remaining in your FaveFinds.")
         elif text.lower() == "done":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
@@ -832,6 +853,24 @@ async def process_message(phone, message, message_id):
             return
 
         msg_type = message.get("type")
+
+        if msg_type == "contacts":
+            contacts = message.get("contacts", [])
+            if contacts:
+                sender_name = user.get("name", phone)
+                added, skipped, at_limit, circle_count = await process_contacts_batch(phone, sender_name, contacts)
+                if at_limit:
+                    await send_whatsapp_message(phone,
+                        "You've reached the 50 person limit. Remove someone to add a new person.")
+                else:
+                    summary = build_contacts_summary(added, skipped, onboarding=False)
+                    await send_whatsapp_message(phone, summary)
+                    if 40 <= circle_count <= 49:
+                        spots_remaining = 50 - circle_count
+                        await send_whatsapp_message(phone,
+                            f"👥 Heads up — you've added {circle_count} people, {spots_remaining} spots remaining in your FaveFinds.")
+            return
+
         text = message.get("text", {}).get("body", "").strip() if msg_type == "text" else ""
 
         if not text:
