@@ -514,7 +514,21 @@ async def handle_command(phone, text, user):
             "*delete last* — remove your last post\n"
             "*pause* — stop sending to your people\n"
             "*resume* — resume sending to your people\n"
+            "*stop prompts* — turn off sharing reminders\n"
+            "*prompts on* — turn reminders back on\n"
             "*help* — show this message")
+        return True
+
+    if cmd in ("stop", "stop prompts", "no more reminders", "stop reminders"):
+        supabase.table("users").update({"prompts_enabled": False}).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone,
+            "Got it — no more reminders! Type *prompts on* anytime to turn them back on.")
+        return True
+
+    if cmd == "prompts on":
+        supabase.table("users").update({"prompts_enabled": True}).eq("phone_number", phone).execute()
+        await send_whatsapp_message(phone,
+            "Reminders back on! I'll nudge you a couple times a week if you haven't shared recently.")
         return True
 
     if cmd == "my feed":
@@ -609,7 +623,7 @@ async def handle_post(phone, text, user):
     circle_count = len(circle.data) if circle.data else 0
 
     await send_whatsapp_message(phone,
-        f"🔗 Saved! Sent to {circle_count} people.")
+        "✅ Nice find — sent to your people!")
 
     # Run AI processing in background so feed gets enriched data
     if post_id:
@@ -763,6 +777,59 @@ async def run_weekly_digest():
     for u in (users.data or []):
         await send_digest(u["phone_number"], "weekly")
 
+PROMPTS = [
+    "🎵 Heard anything good lately? Share it with your people.",
+    "📖 Read anything worth passing along this week?",
+    "🎙️ Any podcasts moving you lately? Your people would love to know.",
+    "✨ What's been moving you this week? Share it here.",
+]
+
+async def run_prompts_scheduler():
+    """Every 6 hours: nudge eligible users who haven't shared recently."""
+    try:
+        now = datetime.now(timezone.utc)
+        # Skip Saturday 22:00 UTC through Sunday 14:00 UTC (digest window)
+        weekday = now.weekday()  # Mon=0 ... Sun=6
+        hour = now.hour
+        in_digest_window = (weekday == 5 and hour >= 22) or (weekday == 6 and hour < 14)
+        if in_digest_window:
+            return
+
+        cutoff_48h = (now - timedelta(hours=48)).isoformat()
+
+        users = supabase.table("users").select("*").eq("onboarding_step", "complete").eq("prompts_enabled", True).execute()
+        for u in (users.data or []):
+            phone = u["phone_number"]
+
+            # Check circle has at least 1 person
+            circle = supabase.table("circle").select("id").eq("sender_phone", phone).limit(1).execute()
+            if not circle.data:
+                continue
+
+            # Check no post in last 48 hours
+            recent_post = supabase.table("posts").select("id").eq("phone_number", phone).gte("created_at", cutoff_48h).limit(1).execute()
+            if recent_post.data:
+                continue
+
+            # Check no prompt sent in last 48 hours
+            last_prompted = u.get("last_prompted_at")
+            if last_prompted and last_prompted > cutoff_48h:
+                continue
+
+            # Send prompt at current index
+            prompt_index = u.get("last_prompt_index") or 0
+            message = PROMPTS[prompt_index % len(PROMPTS)]
+            await send_whatsapp_message(phone, message)
+
+            # Update last_prompted_at and advance index
+            supabase.table("users").update({
+                "last_prompted_at": now.isoformat(),
+                "last_prompt_index": (prompt_index + 1) % len(PROMPTS)
+            }).eq("phone_number", phone).execute()
+
+    except Exception as e:
+        print(f"[Prompts scheduler] Error: {e}")
+
 async def run_midweek_nudge():
     """Every Wednesday at 15:00 UTC: nudge users who haven't shared since last Sunday."""
     try:
@@ -791,6 +858,7 @@ async def startup_event():
     scheduler.add_job(run_daily_digest, 'cron', hour=23, minute=0)
     scheduler.add_job(run_weekly_digest, 'cron', day_of_week='sun', hour=15, minute=0)
     scheduler.add_job(run_midweek_nudge, 'cron', day_of_week='wed', hour=15, minute=0)
+    scheduler.add_job(run_prompts_scheduler, 'interval', hours=6)
     scheduler.start()
 
 @app.on_event("shutdown")
@@ -837,10 +905,9 @@ async def process_message(phone, message, message_id):
             }).execute()
             await send_whatsapp_message(phone,
                 "👋 Welcome to FaveFinds!\n\n"
-                "Social media used to be about sharing your favorite things with your favorite people. Then it got weird.\n\n"
-                "FaveFinds is the good part back.\n\n"
-                "Share your favorite finds here — no more thinking about who to send what.\n\n"
-                "Users get a personalized feed and a weekly (or daily) email digest of their friends' finds — music, podcasts, articles. Simple.\n\n"
+                "Social media — too many people, too much noise.\n"
+                "Messaging apps — too much thinking about who to send what.\n\n"
+                "FaveFinds — simply share your favorite finds here. Music, podcasts, articles, anything that moves you. We drop them to your friends' feeds and into a beautiful weekly newsletter.\n\n"
                 "What's your first name?")
             return
 
