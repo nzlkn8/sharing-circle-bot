@@ -315,6 +315,11 @@ async def process_contacts_batch(sender_phone, sender_name, contacts):
         if existing.data and existing.data[0].get("email"):
             contact_email = existing.data[0]["email"]
 
+        duplicate_check = supabase.table("circle").select("sender_phone").eq("sender_phone", sender_phone).eq("recipient_phone", contact_phone).execute()
+        if duplicate_check.data:
+            skipped += 1
+            continue
+
         supabase.table("circle").insert({
             "sender_phone": sender_phone,
             "recipient_name": name,
