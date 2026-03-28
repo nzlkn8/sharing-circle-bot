@@ -3,6 +3,7 @@ import re
 import random
 import string
 import asyncio
+import urllib.parse
 import httpx
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -79,8 +80,30 @@ async def ai_process(content, is_url=True):
     if is_url:
         url = content
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            # Apple Music
+            if "music.apple.com" in url and ("/album/" in url or "/song/" in url or "/music-video/" in url):
+                try:
+                    r = await client.get(f"https://music.apple.com/oembed?url={urllib.parse.quote(url, safe='')}")
+                    data = r.json()
+                    title = data.get("title", "")
+                    thumbnail = data.get("thumbnail_url")
+                    author_name = data.get("author_name", "")
+                    summary = f"🎵 {title} by {author_name}" if author_name else f"🎵 {title}"
+                    return "music", summary, title, thumbnail, source_type
+                except Exception:
+                    pass
+            # Apple Podcasts
+            elif "podcasts.apple.com" in url:
+                try:
+                    r = await client.get(f"https://music.apple.com/oembed?url={urllib.parse.quote(url, safe='')}")
+                    data = r.json()
+                    title = data.get("title", "")
+                    thumbnail = data.get("thumbnail_url")
+                    return "podcast", "", title, thumbnail, source_type
+                except Exception:
+                    pass
             # Spotify
-            if "open.spotify.com" in url:
+            elif "open.spotify.com" in url:
                 source_type = "spotify"
                 try:
                     r = await client.get(f"https://open.spotify.com/oembed?url={url}")
@@ -110,42 +133,44 @@ async def ai_process(content, is_url=True):
                         page_text = f"Podcast episode: {title}\n{description}"
                 except Exception:
                     page_text = url
-            # YouTube oEmbed — get title then summarize with AI
+            # YouTube — detect podcast by keywords, return early (no AI)
             elif "youtube.com" in url or "youtu.be" in url:
                 source_type = "youtube"
+                podcast_keywords = [
+                    "episode", "ep.", "ep ", "#", "podcast", "interview",
+                    "conversation with", "talk with", "talks with", "with guest", "season"
+                ]
                 try:
                     r = await client.get(f"https://www.youtube.com/oembed?url={url}&format=json")
                     data = r.json()
-                    title = data.get("title")
+                    title = data.get("title", "")
                     thumbnail = data.get("thumbnail_url")
-                    page_text = f"YouTube video: {title}"
+                    author_name = data.get("author_name", "")
+                    combined = f"{title} {author_name}".lower()
+                    if any(kw in combined for kw in podcast_keywords):
+                        return "podcast", "", title, thumbnail, source_type
+                    else:
+                        return "other", "", title, thumbnail, source_type
                 except Exception:
                     pass
-            # Twitter/X — skip scraping, use OG metadata only
-            elif "x.com" in url or "twitter.com" in url:
-                source_type = "link"
+            # No-scrape blocklist — return OG title/thumbnail only, no AI summary
+            elif any(d in url for d in ["x.com", "twitter.com", "instagram.com", "facebook.com", "tiktok.com", "linkedin.com"]):
                 try:
                     r = await client.get(url, headers={
                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     })
-                    title_match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
-                    if title_match:
-                        title = title_match.group(1).strip()
-                    og_desc_match = re.search(r'<meta[^>]+(?:property=["\']og:description["\']|name=["\']description["\'])[^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
                     og_title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
+                    title_match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
                     thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text, re.IGNORECASE)
-                    if og_title_match and not title:
+                    if og_title_match:
                         title = og_title_match.group(1).strip()
+                    elif title_match:
+                        title = title_match.group(1).strip()
                     if thumb_match:
                         thumbnail = thumb_match.group(1).strip()
-                    if og_desc_match:
-                        page_text = f"Tweet/post: {og_desc_match.group(1).strip()}"
-                    elif title:
-                        page_text = f"Tweet/post: {title}"
-                    else:
-                        page_text = url
                 except Exception:
-                    page_text = url
+                    pass
+                return "other", "", title, thumbnail, source_type
             # Generic URL — fetch and extract text
             if not page_text:
                 try:
@@ -164,50 +189,22 @@ async def ai_process(content, is_url=True):
                 except Exception:
                     page_text = url
 
-        is_youtube = "youtube.com" in url or "youtu.be" in url
-        is_podcast = "open.spotify.com" in url and "/episode/" in url
-        is_twitter = "x.com" in url or "twitter.com" in url
-        if is_twitter:
-            prompt = f"""Analyze this tweet/post and provide:
-1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 2-3 bullet points summarizing what this post is about. Put each bullet point on a new line.
-
-Content: {page_text}
-
-Respond in this exact format:
-CATEGORY: [category]
-BULLETS:
-- [point 1]
-- [point 2]
-- [optional point 3]"""
-        elif is_youtube:
-            prompt = f"""Analyze this YouTube video and provide:
-1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 1-2 bullet points about what this video is likely about, based on the title. Put each bullet point on a new line.
-
-Content: {page_text}
-
-Respond in this exact format:
-CATEGORY: [category]
-BULLETS:
-- [point 1]
-- [optional point 2]"""
-        elif is_podcast:
+        is_spotify_episode = "open.spotify.com" in url and "/episode/" in url
+        if is_spotify_episode:
             prompt = f"""Analyze this podcast episode and provide:
-1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
-2. Exactly 2-3 bullet points summarizing what this episode is about. Put each bullet point on a new line.
+1. Exactly 2-3 bullet points summarizing what this episode is about. Put each bullet point on a new line.
 
 Content: {page_text}
 
 Respond in this exact format:
-CATEGORY: [category]
+CATEGORY: podcast
 BULLETS:
 - [point 1]
 - [point 2]
 - [optional point 3]"""
         else:
             prompt = f"""Analyze this web content and provide:
-1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+1. Category (one of: article, other)
 2. Exactly 2-3 bullet points summarizing what this is about. Put each bullet point on a new line.
 
 Content: {page_text}
@@ -220,7 +217,7 @@ BULLETS:
 - [optional point 3]"""
     else:
         prompt = f"""Analyze this thought/message and provide:
-1. Category (one of: music, markets, health, news, tech, food, travel, sports, entertainment, other)
+1. Category (one of: music, podcast, article, other)
 2. Exactly 2-3 bullet points summarizing the key points. Put each bullet point on a new line.
 
 Text: {content}
