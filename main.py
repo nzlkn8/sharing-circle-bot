@@ -394,18 +394,13 @@ async def handle_onboarding(user, phone, message):
                 await send_whatsapp_message(phone,
                     "You've reached the 50 person limit. Remove someone to add a new person.")
                 return
-            if added > 0:
-                supabase.table("users").update({"onboarding_step": "awaiting_more_contacts"}).eq("phone_number", phone).execute()
-            summary = build_contacts_summary(added, skipped, onboarding=True)
-            await send_whatsapp_message(phone, summary)
-            if 40 <= circle_count <= 49:
-                spots_remaining = 50 - circle_count
-                await send_whatsapp_message(phone,
-                    f"👥 Heads up — you've added {circle_count} people, {spots_remaining} spots remaining in your FaveFinds.")
+            supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
+            await send_whatsapp_message(phone,
+                "🎉 All set! Last step — share your first find. A song, podcast, or article you've enjoyed recently. Just paste the link here!")
         else:
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
-                "Now share a link — a song, podcast or article you've been enjoying lately 🔗")
+                "🎉 Last step — share your first find. A song, podcast, or article you've enjoyed recently. Just paste the link here!")
         return
 
     if step == "awaiting_more_contacts":
@@ -419,19 +414,9 @@ async def handle_onboarding(user, phone, message):
                 await send_whatsapp_message(phone,
                     "You've reached the 50 person limit. Remove someone to add a new person.")
                 return
-            summary = build_contacts_summary(added, skipped, onboarding=True)
-            await send_whatsapp_message(phone, summary)
-            if 40 <= circle_count <= 49:
-                spots_remaining = 50 - circle_count
-                await send_whatsapp_message(phone,
-                    f"👥 Heads up — you've added {circle_count} people, {spots_remaining} spots remaining in your FaveFinds.")
-        elif text.lower() == "done":
             supabase.table("users").update({"onboarding_step": "awaiting_first_link"}).eq("phone_number", phone).execute()
             await send_whatsapp_message(phone,
-                "Now share a link — a song, podcast or article you've been enjoying lately 🔗")
-        else:
-            await send_whatsapp_message(phone,
-                "Please share a contact card (tap + → Contact) or type *done* to continue.")
+                "🎉 All set! Last step — share your first find. A song, podcast, or article you've enjoyed recently. Just paste the link here!")
         return
 
     if step == "awaiting_first_link":
@@ -620,14 +605,7 @@ async def handle_post(phone, text, user):
     }).execute()
     post_id = result.data[0]["id"] if result.data else None
 
-    # Get circle
-    circle = supabase.table("circle").select("*").eq("sender_phone", phone).execute()
-    circle_count = len(circle.data) if circle.data else 0
-
-    await send_whatsapp_message(phone,
-        "✅ Nice find — sent to your people!")
-
-    # Run AI processing in background so feed gets enriched data
+    # Run AI processing then send confirmation
     if post_id:
         async def enrich_post():
             try:
@@ -641,7 +619,10 @@ async def handle_post(phone, text, user):
                 }).eq("id", post_id).execute()
             except:
                 pass
+            await send_whatsapp_message(phone, "✅ Nice find — sent to your people!")
         asyncio.create_task(enrich_post())
+    else:
+        await send_whatsapp_message(phone, "✅ Nice find — sent to your people!")
 
 
 # --- Digest ---
@@ -895,27 +876,10 @@ async def verify(request: Request):
     return PlainTextResponse(content="Verification failed", status_code=403)
 
 async def process_message(phone, message, message_id):
+    """Handles complete users only (AI/post path runs in background)."""
     try:
         user = get_user(phone)
-
         if not user:
-            slug = generate_slug(phone[-6:])
-            supabase.table("users").insert({
-                "phone_number": phone,
-                "feed_slug": slug,
-                "onboarding_step": "awaiting_name"
-            }).execute()
-            await send_whatsapp_message(phone,
-                "👋 Welcome to FaveFinds!\n\n"
-                "Social media — too many people, too much noise.\n"
-                "Messaging apps — too much thinking about who to send what.\n\n"
-                "FaveFinds — simply share your favorite finds here. Music, podcasts, articles, anything that moves you. We drop them to your friends' feeds and into a beautiful weekly newsletter.\n\n"
-                "What's your first name?")
-            return
-
-        step = user.get("onboarding_step", "complete")
-        if step != "complete":
-            await handle_onboarding(user, phone, message)
             return
 
         msg_type = message.get("type")
@@ -965,21 +929,48 @@ async def handle_message(request: Request, background_tasks: BackgroundTasks):
 
         message = value["messages"][0]
         message_id = message["id"]
+        phone = message["from"]
+        msg_type = message.get("type")
+        text = message.get("text", {}).get("body", "").strip() if msg_type == "text" else ""
 
+        # Dedup
         if message_id in processed_messages:
             print(f"[Dedup] Skipping duplicate message {message_id}")
             return {"status": "ok"}
         processed_messages.add(message_id)
-
-        phone = message["from"]
-        msg_type = message.get("type")
+        if len(processed_messages) > 10000:
+            processed_messages.clear()
 
         if msg_type not in ("text", "contacts"):
             return {"status": "ok"}
 
-        if msg_type == "text" and not message.get("text", {}).get("body", "").strip():
+        if msg_type == "text" and not text:
             return {"status": "ok"}
 
+        # New user: create row and send welcome synchronously
+        user = get_user(phone)
+        if not user:
+            slug = generate_slug(phone[-6:])
+            supabase.table("users").insert({
+                "phone_number": phone,
+                "feed_slug": slug,
+                "onboarding_step": "awaiting_name"
+            }).execute()
+            await send_whatsapp_message(phone,
+                "👋 Welcome to FaveFinds!\n\n"
+                "Social media — too many people, too much noise.\n"
+                "Messaging apps — too much thinking about who to send what.\n\n"
+                "FaveFinds — simply share your favorite finds here. Music, podcasts, articles, anything that moves you. We drop them to your friends' feeds and into a beautiful weekly newsletter.\n\n"
+                "What's your first name?")
+            return {"status": "ok"}
+
+        # Onboarding: handle synchronously
+        step = user.get("onboarding_step", "complete")
+        if step != "complete":
+            await handle_onboarding(user, phone, message)
+            return {"status": "ok"}
+
+        # Complete users: background (AI for links is slow)
         background_tasks.add_task(process_message, phone, message, message_id)
 
     except Exception as e:
